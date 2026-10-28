@@ -1,0 +1,39 @@
+# plugin-claude
+
+Marketplace de plugins do Claude Code. Por enquanto tem um plugin, o **cassino**: um mini cassino em pixel art para jogar no terminal com fichas fictícias enquanto o Claude trabalha. Tem roleta, blackjack e caça-níquel, tudo jogado com o mouse.
+
+## Instalar
+
+No Claude Code:
+
+```
+/plugin marketplace add RicardoLima28/plugin-claude
+/plugin install cassino@plugin-claude
+```
+
+Depois disso, o comando `/cassino` explica como abrir o jogo.
+
+## Jogar sem o plugin
+
+O jogo é um único arquivo Python, que usa só a biblioteca padrão (Python 3.8 ou mais novo) e roda no Windows, no macOS e no Linux:
+
+```
+git clone https://github.com/RicardoLima28/plugin-claude
+python plugin-claude/cassino/app/cassino.py --lado
+```
+
+Com `--lado`, ele abre num painel à direita no Windows Terminal, tmux, WezTerm, kitty e Zellij. Nos outros terminais, roda na própria janela.
+
+## Estrutura
+
+```
+.claude-plugin/marketplace.json   lista os plugins do marketplace
+cassino/
+  .claude-plugin/plugin.json      manifesto do plugin
+  app/cassino.py                  o jogo
+  hooks/register.tsx              registra o comando /cassino
+  tests/cassino.test.ts           teste do comando
+  README.md                       atalhos, cores e saldo
+```
+
+Os detalhes do jogo (atalho no Windows Terminal, comando `cassino` no PATH, cores e onde o saldo fica salvo) estão em [cassino/README.md](cassino/README.md).
