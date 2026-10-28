@@ -1,0 +1,5 @@
+{
+  "name": "cassino",
+  "version": "0.2.0",
+  "description": "Mini cassino pixelizado num painel do Windows Terminal: roleta, blackjack e caça-níquel com fichas fictícias"
+}

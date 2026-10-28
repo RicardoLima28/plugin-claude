@@ -1,0 +1,863 @@
+#!/usr/bin/env python3
+"""Mini cassino pixelizado para o terminal, jogado com o mouse.
+
+    python cassino.py          roda nesta janela
+    python cassino.py --lado   abre num painel à direita quando o terminal
+                               deixa (Windows Terminal, tmux, WezTerm, kitty,
+                               Zellij); nos outros, roda nesta janela
+
+Funciona no Windows, no macOS e no Linux, só com a biblioteca padrão.
+Para sair, clique em Sair ou aperte q. CASSINO_CORES=256 força 256 cores.
+"""
+
+import json
+import math
+import os
+import queue
+import random
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+SAVE = os.path.join(os.path.expanduser('~'), '.claude', 'cassino-save.json')
+rng = random.SystemRandom()
+TAU = 2 * math.pi
+BETS = [10, 25, 50, 100, 250, 500, 1000]
+START = 1000
+
+
+def money(n):
+    return f'{round(n):,}'.replace(',', '.')
+
+
+# ---------- Roleta (europeia, um zero) ----------
+
+WHEEL = [
+    0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10, 5,
+    24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26,
+]
+REDS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
+POCKET = TAU / len(WHEEL)
+NAME = {'red': 'VERMELHO', 'black': 'PRETO', 'green': 'VERDE'}
+PAYS = {'red': 2, 'black': 2, 'green': 36}
+R_FRAMES, R_DT = 60, 0.05
+
+
+def color_of(n):
+    return 'green' if n == 0 else 'red' if n in REDS else 'black'
+
+
+# ---------- Blackjack ----------
+
+SUITS = '♠♥♦♣'
+RANKS = ['', 'A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
+DEALER_DT = 0.55
+
+
+def draw_card():
+    return [1 + rng.randrange(13), rng.randrange(4)]
+
+
+def total(hand):
+    s = sum(11 if r == 1 else min(10, r) for r, _ in hand)
+    aces = sum(1 for r, _ in hand if r == 1)
+    while s > 21 and aces:
+        s -= 10
+        aces -= 1
+    return s
+
+
+def natural(hand):
+    return len(hand) == 2 and total(hand) == 21
+
+
+# ---------- Caça-níquel ----------
+
+SYMBOLS = ['cereja', 'limão', 'sino', 'estrela', 'sete', 'diamante']
+WEIGHTS = [30, 25, 18, 12, 8, 4]
+TRIPLE = [5, 15, 25, 50, 100, 250]
+PITCH = 10
+STOPS = [28, 40, 52]
+S_FRAMES, S_DT = 52, 0.045
+
+
+def payout(faces):
+    a, b, c = faces
+    if a == b == c:
+        return TRIPLE[a]
+    if faces.count(0) == 2:
+        return 1
+    return 0
+
+
+class Casino:
+    def __init__(self):
+        self.coins = START
+        self.bet = 50
+        self.tab = 'roleta'
+        self.msg = 'Bem-vindo! Escolha uma aposta.'
+        self.tone = None
+        self.r = dict(spinning=False, frame=R_FRAMES, wfrom=0.0, wto=0.0, ballto=0.0,
+                      result=0, pick=None, stake=0, history=[])
+        self.bj = dict(phase='bet', dealer=[], player=[], hide=False, stake=0)
+        self.sl = dict(spinning=False, frame=S_FRAMES, strips=[[4], [4], [4]], stake=0)
+        self.due = {}
+
+    # ----- saldo -----
+
+    @classmethod
+    def load(cls):
+        game = cls()
+        try:
+            with open(SAVE, encoding='utf-8') as f:
+                data = json.load(f)
+            game.coins = int(data.get('coins', START))
+            game.bet = data.get('bet', 50) if data.get('bet') in BETS else 50
+            game.tab = data.get('tab', 'roleta')
+            game.r['history'] = list(data.get('history', []))[:12]
+            game.msg = f'Bem-vindo de volta! Saldo {money(game.coins)}.'
+        except (OSError, ValueError, TypeError):
+            pass
+        return game
+
+    def save(self):
+        os.makedirs(os.path.dirname(SAVE), exist_ok=True)
+        with open(SAVE, 'w', encoding='utf-8') as f:
+            json.dump({'coins': self.coins, 'bet': self.bet, 'tab': self.tab,
+                       'history': self.r['history']}, f)
+
+    def say(self, msg, tone=None):
+        self.msg, self.tone = msg, tone
+
+    def take_bet(self):
+        if self.coins < self.bet:
+            self.say('Fichas insuficientes: baixe a aposta.', 'lose')
+            return False
+        self.coins -= self.bet
+        return True
+
+    def shift_bet(self, d):
+        i = BETS.index(self.bet) if self.bet in BETS else 2
+        self.bet = BETS[max(0, min(len(BETS) - 1, i + d))]
+
+    def refill(self):
+        self.coins += START
+        self.say(f'+{money(START)} fichas da casa.')
+        self.save()
+
+    def busy(self):
+        return self.r['spinning'] or self.sl['spinning'] or self.bj['phase'] == 'dealer'
+
+    # ----- roleta -----
+
+    def spin(self, pick):
+        r = self.r
+        if r['spinning'] or not self.take_bet():
+            return
+        result = rng.randrange(len(WHEEL))
+        wfrom = r['wto'] % TAU
+        wto = wfrom + TAU * (1.5 + rng.random())
+        r.update(spinning=True, frame=0, wfrom=wfrom, wto=wto, ballto=wto + result * POCKET,
+                 result=result, pick=pick, stake=self.bet)
+        self.say(f'Girando... {money(self.bet)} no {NAME[pick]}')
+
+    def step_roulette(self):
+        r = self.r
+        r['frame'] += 1
+        if r['frame'] < R_FRAMES:
+            return
+        r['spinning'] = False
+        n = WHEEL[r['result']]
+        c = color_of(n)
+        won = r['stake'] * PAYS[c] if r['pick'] == c else 0
+        self.coins += won
+        r['history'] = [n] + r['history'][:11]
+        head = f'Deu {n} {NAME[c]}!'
+        if won:
+            self.say(f'{head} Ganhou +{money(won)}', 'win')
+        else:
+            self.say(f'{head} Perdeu {money(r["stake"])}', 'lose')
+        self.save()
+
+    # ----- blackjack -----
+
+    def deal(self):
+        bj = self.bj
+        if bj['phase'] in ('play', 'dealer') or not self.take_bet():
+            return
+        bj.update(phase='play', player=[draw_card(), draw_card()],
+                  dealer=[draw_card(), draw_card()], hide=True, stake=self.bet)
+        if natural(bj['player']) or natural(bj['dealer']):
+            self.settle()
+        else:
+            self.say(f'Sua mão: {total(bj["player"])}. Pedir ou parar?')
+
+    def hit(self):
+        bj = self.bj
+        if bj['phase'] != 'play':
+            return
+        bj['player'].append(draw_card())
+        s = total(bj['player'])
+        if s > 21:
+            self.settle()
+        elif s == 21:
+            self.stand()
+        else:
+            self.say(f'Sua mão: {s}.')
+
+    def stand(self):
+        bj = self.bj
+        if bj['phase'] != 'play':
+            return
+        bj.update(phase='dealer', hide=False)
+        self.say('A banca revela a carta...')
+
+    def double(self):
+        bj = self.bj
+        if bj['phase'] != 'play' or len(bj['player']) != 2:
+            return
+        if self.coins < bj['stake']:
+            self.say('Fichas insuficientes para dobrar.', 'lose')
+            return
+        self.coins -= bj['stake']
+        bj['stake'] *= 2
+        bj['player'].append(draw_card())
+        if total(bj['player']) > 21:
+            self.settle()
+        else:
+            self.stand()
+
+    def step_dealer(self):
+        bj = self.bj
+        if total(bj['dealer']) < 17:
+            bj['dealer'].append(draw_card())
+            self.say(f'Banca compra: {total(bj["dealer"])}')
+        else:
+            self.settle()
+
+    def settle(self):
+        bj = self.bj
+        me, house, st = total(bj['player']), total(bj['dealer']), bj['stake']
+        bj.update(phase='done', hide=False)
+
+        def pay(mult, msg, tone):
+            self.coins += st * mult
+            self.say(msg, tone)
+            self.save()
+
+        if me > 21:
+            pay(0, f'Estourou com {me}! Perdeu {money(st)}', 'lose')
+        elif natural(bj['player']) and not natural(bj['dealer']):
+            pay(2.5, f'BLACKJACK! +{money(st * 2.5)}', 'win')
+        elif natural(bj['dealer']) and not natural(bj['player']):
+            pay(0, f'Blackjack da banca. Perdeu {money(st)}', 'lose')
+        elif house > 21:
+            pay(2, f'Banca estourou ({house})! +{money(st * 2)}', 'win')
+        elif me > house:
+            pay(2, f'{me} x {house}: ganhou +{money(st * 2)}', 'win')
+        elif me == house:
+            pay(1, f'Empate em {me}. Aposta devolvida.', None)
+        else:
+            pay(0, f'{house} x {me}: a banca leva {money(st)}', 'lose')
+
+    # ----- caça-níquel -----
+
+    def pull(self):
+        sl = self.sl
+        if sl['spinning'] or not self.take_bet():
+            return
+        # each strip starts at the symbol on show and ends at the new one;
+        # the later reels have longer strips, so they stop one after another
+        strips = []
+        for i, old in enumerate(sl['strips']):
+            strip = [old[-1]] + [rng.randrange(len(SYMBOLS)) for _ in range(16 + i * 6)]
+            strip.append(rng.choices(range(len(SYMBOLS)), WEIGHTS)[0])
+            strips.append(strip)
+        sl.update(spinning=True, frame=0, strips=strips, stake=self.bet)
+        self.say(f'Girando... {money(self.bet)}')
+
+    def step_slots(self):
+        sl = self.sl
+        sl['frame'] += 1
+        if sl['frame'] < S_FRAMES:
+            return
+        sl['spinning'] = False
+        faces = [s[-1] for s in sl['strips']]
+        mult = payout(faces)
+        won = sl['stake'] * mult
+        self.coins += won
+        if mult >= 50:
+            self.say(f'JACKPOT! {mult}x +{money(won)}', 'win')
+        elif mult > 1:
+            self.say(f'Trinca de {SYMBOLS[faces[0]]}! +{money(won)}', 'win')
+        elif mult == 1:
+            self.say('Duas cerejas: aposta de volta.', None)
+        else:
+            self.say(f'Nada dessa vez. Perdeu {money(sl["stake"])}', 'lose')
+        self.save()
+
+    # ----- relógio -----
+
+    def tick(self, now):
+        changed = False
+        for key, running, dt, step in (
+            ('r', self.r['spinning'], R_DT, self.step_roulette),
+            ('s', self.sl['spinning'], S_DT, self.step_slots),
+            ('d', self.bj['phase'] == 'dealer', DEALER_DT, self.step_dealer),
+        ):
+            if not running:
+                self.due.pop(key, None)
+                continue
+            due = self.due.setdefault(key, now + dt)
+            if now >= due:
+                step()
+                self.due[key] = max(due + dt, now)
+                changed = True
+        return changed
+
+    def finish(self):
+        while self.r['spinning']:
+            self.step_roulette()
+        while self.sl['spinning']:
+            self.step_slots()
+        while self.bj['phase'] == 'dealer':
+            self.step_dealer()
+
+
+# ---------- Tela ----------
+
+KEEP = object()
+
+
+class Screen:
+    def __init__(self, w, h):
+        self.w, self.h = w, h
+        self.cells = [[(' ', None, None)] * w for _ in range(h)]
+        self.hits = []
+
+    def put(self, x, y, ch, fg=None, bg=KEEP):
+        if 0 <= x < self.w and 0 <= y < self.h:
+            if bg is KEEP:
+                bg = self.cells[y][x][2]
+            self.cells[y][x] = (ch, fg, bg)
+
+    def text(self, x, y, s, fg=None, bg=KEEP):
+        for i, ch in enumerate(s):
+            self.put(x + i, y, ch, fg, bg)
+
+    def button(self, x, y, label, action, fg, bg):
+        s = f' {label} '
+        self.text(x, y, s, fg, bg)
+        if action:
+            self.hits.append((x, x + len(s), y, action))
+        return len(s)
+
+    def row(self, y, items, gap=1):
+        """Centers a row of buttons: items are (label, action, fg, bg)."""
+        width = sum(len(i[0]) + 2 for i in items) + gap * (len(items) - 1)
+        x = (self.w - width) // 2
+        for label, action, fg, bg in items:
+            x += self.button(x, y, label, action, fg, bg) + gap
+
+    def center(self, y, s, fg=None, bg=KEEP):
+        self.text((self.w - len(s)) // 2, y, s, fg, bg)
+
+
+class Pixels:
+    """Square pixels, two per cell: the top one a half block's foreground."""
+
+    def __init__(self, w, h):
+        self.w, self.h = w, h
+        self.px = [[None] * w for _ in range(h)]
+
+    def set(self, x, y, c):
+        x, y = int(math.floor(x)), int(math.floor(y))
+        if 0 <= x < self.w and 0 <= y < self.h:
+            self.px[y][x] = c
+
+    def rect(self, x, y, w, h, c):
+        for j in range(h):
+            for i in range(w):
+                self.set(x + i, y + j, c)
+
+    def sprite(self, x, y, rows, palette, top, bottom):
+        for j, row in enumerate(rows):
+            if top <= y + j <= bottom:
+                for i, ch in enumerate(row):
+                    if ch in palette:
+                        self.set(x + i, y + j, palette[ch])
+
+    def blit(self, scr, ox, oy):
+        for cy in range(self.h // 2):
+            for x in range(self.w):
+                t, b = self.px[2 * cy][x], self.px[2 * cy + 1][x]
+                if t is None and b is None:
+                    continue
+                if t == b:
+                    scr.put(ox + x, oy + cy, ' ', None, t)
+                elif t is None:
+                    scr.put(ox + x, oy + cy, '▄', b, None)
+                else:
+                    scr.put(ox + x, oy + cy, '▀', t, b)
+
+
+POCKET_COLOR = {'red': 0xd42a2a, 'black': 0x1c1c1c, 'green': 0x16a34a}
+
+
+def wheel_art(r, size=22):
+    p = Pixels(size, size)
+    t = min(1, r['frame'] / R_FRAMES)
+    e = 1 - (1 - t) ** 3
+    wheel = r['wfrom'] + (r['wto'] - r['wfrom']) * e
+    ball = r['ballto'] + (1 - e) * TAU * 3
+    drop = 0 if t < 0.7 else (t - 0.7) / 0.3
+    c = R = size / 2
+    hub = R * 0.36
+    for y in range(size):
+        for x in range(size):
+            dx, dy = x + 0.5 - c, y + 0.5 - c
+            d = math.hypot(dx, dy)
+            if d > R:
+                continue
+            if d > R - 0.9:
+                col = 0xe2b93b if dy < 0 else 0x9c7418
+            elif d > R - 2.8:
+                col = 0x5a3a1e
+            elif d > hub:
+                rel = (math.atan2(dy, dx) - wheel) % TAU
+                col = POCKET_COLOR[color_of(WHEEL[round(rel / POCKET) % len(WHEEL)])]
+            elif d > hub - 1:
+                col = 0xc9a227
+            else:
+                # the turret: four gold spokes turning with the wheel
+                spoke = min(
+                    abs(dx * math.sin(s) - dy * math.cos(s))
+                    + (99 if dx * math.cos(s) + dy * math.sin(s) < 0 else 0)
+                    for s in (wheel + k * math.pi / 2 for k in range(4))
+                )
+                col = 0xe2b93b if spoke < 0.7 or d < 1.2 else 0x3b2412
+            p.set(x, y, col)
+    track = R - 2
+    depth = track - (track - (R - 3.8)) * drop
+    p.set(c + math.cos(ball) * depth, c + math.sin(ball) * depth, 0xffffff)
+    return p
+
+
+SPRITES = [
+    ['....gg..', '...g..g.', '..g...g.', '.g....g.', 'rwr..rwr', 'rrr..rrr', '.r....r.', '........'],
+    ['........', '..yyyy..', '.ywyyyy.', 'yyyyyyyo', 'yyyyyyyo', '.yyyyyo.', '..yooo..', '........'],
+    ['...oo...', '..oyyo..', '.oywyyo.', '.oyyyyo.', '.oyyyyo.', 'oyyyyyyo', 'oooooooo', '...oo...'],
+    ['...yy...', '...yy...', 'yyywyyyy', '.yyyyyy.', '..yyyy..', '.yy..yy.', 'yy....yy', '........'],
+    ['RRRRRRRR', 'RRRRRRRR', '.....RR.', '....RR..', '...RR...', '...RR...', '..RR....', '..RR....'],
+    ['........', '..cccc..', '.cwccbc.', 'cccccccb', '.cccccb.', '..cccb..', '...cb...', '........'],
+]
+SPRITE_COLORS = {'g': 0x2f9e44, 'r': 0xe03131, 'w': 0xffffff, 'y': 0xffd43b,
+                 'o': 0xe8890c, 'R': 0xd6001c, 'c': 0x66d9e8, 'b': 0x1c7ed6}
+
+
+def reels_art(sl, won):
+    W, H = 28, 16
+    p = Pixels(W, H)
+    p.rect(0, 0, W, H, 0xc9a227)
+    for i, strip in enumerate(sl['strips']):
+        x0 = 1 + i * 9
+        p.rect(x0, 1, 8, 14, 0xf8f1e3)
+        stop = STOPS[i]
+        t = min(1, sl['frame'] / stop) if sl['spinning'] else 1
+        pos = round((len(strip) - 1) * PITCH * (1 - (1 - t) ** 3))
+        # window row wy shows strip row pos + wy - 3; symbol k sits at k*PITCH+1
+        for k in range(-2, 3):
+            base = pos // PITCH + k
+            sym = strip[base % len(strip)]
+            top = base * PITCH + 1 - pos + 4
+            p.sprite(x0, top, SPRITES[sym], SPRITE_COLORS, 1, 14)
+    mark = 0x40c057 if won else 0xe03131
+    for y in (8, 9):
+        p.set(0, y, mark)
+        p.set(W - 1, y, mark)
+    return p
+
+
+FELT, FELT_TEXT = 0x0f5132, 0xd8f5e3
+
+
+def card_art(scr, x, y, card):
+    if card is None:
+        for j in range(3):
+            scr.text(x, y + j, '▒' * 5, 0x748ffc, 0x1c3d8f)
+        return
+    rank, suit = card
+    ink = 0xc92a2a if suit in (1, 2) else 0x111111
+    for j in range(3):
+        scr.text(x, y + j, ' ' * 5, ink, 0xf8f9fa)
+    label = RANKS[rank]
+    scr.text(x, y, label, ink)
+    scr.put(x + 2, y + 1, SUITS[suit], ink)
+    scr.text(x + 5 - len(label), y + 2, label, ink)
+
+
+def table_art(scr, bj, x0, y0, width):
+    for j in range(9):
+        scr.text(x0, y0 + j, ' ' * width, None, FELT)
+    dealer = bj['dealer']
+    shown = dealer[:1] if bj['hide'] else dealer
+    dealer_total = (f'{total(shown)} + ?' if bj['hide'] else str(total(dealer))) if dealer else ''
+    scr.text(x0 + 1, y0, f'BANCA {dealer_total}', FELT_TEXT)
+    scr.text(x0 + 1, y0 + 8, f'VOCÊ {total(bj["player"]) if bj["player"] else ""}', FELT_TEXT)
+    if not dealer:
+        scr.text(x0 + 1, y0 + 3, 'Aposte e distribua', FELT_TEXT)
+
+    def seat(hand, y):
+        step = min(6, (width - 7) // (len(hand) - 1)) if len(hand) > 1 else 6
+        for i, card in enumerate(hand):
+            card_art(scr, x0 + 1 + i * step, y, card)
+
+    seat([dealer[0], None] if bj['hide'] else dealer, y0 + 1)
+    seat(bj['player'], y0 + 5)
+    if bj['stake']:
+        chip = f'● {money(bj["stake"])}'
+        scr.text(x0 + width - 1 - len(chip), y0 + 4, chip, 0xffd43b)
+
+
+GOLD = 0xffd43b
+DIM = 0x868e96
+TAB_BG, TAB_ON = 0x343a40, 0xffd43b
+BTN_BG = 0x495057
+
+
+def layout(game, w, h):
+    scr = Screen(w, h)
+    y = 0
+    scr.center(y, '♠ ♥  C A S S I N O  ♦ ♣', GOLD)
+    y += 1
+    scr.center(y, f'● {money(game.coins)} fichas', GOLD)
+    y += 2
+
+    def tab(id, label):
+        on = game.tab == id
+
+        def go():
+            game.tab = id
+            game.save()
+        return (label, go, 0x111111 if on else 0xdee2e6, TAB_ON if on else TAB_BG)
+
+    scr.row(y, [tab('roleta', 'Roleta'), tab('blackjack', 'Blackjack'), tab('slots', 'Slots')])
+    y += 2
+
+    if game.tab == 'roleta':
+        r = game.r
+        art = wheel_art(r)
+        art.blit(scr, (w - art.w) // 2, y)
+        y += art.h // 2
+        hist = r['history'][:7]
+        if hist:
+            width = sum(len(str(n)) + 2 for n in hist)
+            x = (w - width) // 2
+            for n in hist:
+                scr.text(x, y, f' {n} ', 0xffffff, POCKET_COLOR[color_of(n)])
+                x += len(str(n)) + 2
+        y += 2
+        live = not r['spinning']
+
+        def pick(color, label, bg):
+            return (label, (lambda: game.spin(color)) if live else None,
+                    0xffffff if live else DIM, bg if live else TAB_BG)
+        scr.row(y, [pick('red', 'Vermelho', 0xc92a2a), pick('black', 'Preto', 0x1a1a1a),
+                    pick('green', 'Verde', 0x2b8a3e)])
+        y += 1
+        scr.center(y, 'paga 2x · 2x · 36x', DIM)
+        y += 2
+    elif game.tab == 'blackjack':
+        bj = game.bj
+        width = max(24, min(w - 2, 30))
+        table_art(scr, bj, (w - width) // 2, y, width)
+        y += 10
+        if bj['phase'] in ('bet', 'done'):
+            label = 'Distribuir' if bj['phase'] == 'bet' else 'Nova mão'
+            scr.row(y, [(label, game.deal, 0x111111, GOLD)])
+        elif bj['phase'] == 'play':
+            items = [('Pedir', game.hit, 0xffffff, BTN_BG), ('Parar', game.stand, 0xffffff, BTN_BG)]
+            if len(bj['player']) == 2:
+                items.append(('Dobrar', game.double, 0xffffff, BTN_BG))
+            scr.row(y, items)
+        else:
+            scr.center(y, 'vez da banca...', GOLD)
+        y += 2
+        scr.center(y, 'blackjack paga 3:2', DIM)
+        y += 2
+    else:
+        sl = game.sl
+        won = not sl['spinning'] and sl['stake'] and payout([s[-1] for s in sl['strips']]) > 1
+        art = reels_art(sl, won)
+        art.blit(scr, (w - art.w) // 2, y)
+        y += art.h // 2 + 1
+        live = not sl['spinning']
+        scr.row(y, [('  GIRAR  ', game.pull if live else None,
+                     0x111111 if live else DIM, GOLD if live else TAB_BG)])
+        y += 2
+        for line in ('cereja 5x · limão 15x · sino 25x', 'estrela 50x · sete 100x',
+                     'diamante 250x · 2 cerejas 1x'):
+            scr.center(y, line, DIM)
+            y += 1
+        y += 1
+
+    def bet(d):
+        return lambda: (game.shift_bet(d), game.save())
+    scr.row(y, [(' - ', bet(-1), 0xffffff, BTN_BG), (f'aposta {money(game.bet)}', None, GOLD, None),
+                (' + ', bet(1), 0xffffff, BTN_BG)])
+    y += 2
+
+    tone = {'win': 0x51cf66, 'lose': 0xff6b6b}.get(game.tone, 0xdee2e6)
+    for line in wrap(game.msg, max(10, min(w - 2, 32)))[:2]:
+        scr.center(y, line, tone)
+        y += 1
+    y += 1
+
+    items = []
+    if game.coins < BETS[0] and not game.busy():
+        items.append((f'+{money(START)} fichas', game.refill, 0x111111, GOLD))
+    items.append(('Sair', lambda: 'quit', 0xffffff, 0x862e2e))
+    scr.row(max(y, h - 1), items)
+    return scr
+
+
+def wrap(text, width):
+    lines, line = [], ''
+    for word in text.split():
+        if line and len(line) + 1 + len(word) > width:
+            lines.append(line)
+            line = word
+        else:
+            line = f'{line} {word}'.strip()
+    return lines + [line] if line else lines
+
+
+def has_truecolor():
+    forced = os.environ.get('CASSINO_CORES')
+    if forced:
+        return forced != '256'
+    if os.environ.get('COLORTERM', '').lower() in ('truecolor', '24bit'):
+        return True
+    if os.name == 'nt' or os.environ.get('WT_SESSION'):
+        return True
+    if os.environ.get('TERM_PROGRAM') in ('vscode', 'iTerm.app', 'WezTerm', 'ghostty', 'Hyper', 'Tabby'):
+        return True
+    term = os.environ.get('TERM', '')
+    return any(t in term for t in ('kitty', 'alacritty', 'direct', 'foot', 'ghostty'))
+
+
+TRUECOLOR = has_truecolor()
+
+
+def xterm256(c):
+    r, g, b = c >> 16 & 255, c >> 8 & 255, c & 255
+    if max(r, g, b) - min(r, g, b) < 12:
+        gray = (r + g + b) // 3
+        if gray < 8:
+            return 16
+        if gray > 238:
+            return 231
+        return 232 + (gray - 8) * 24 // 231
+    level = lambda v: 0 if v < 48 else 1 if v < 115 else (v - 35) // 40
+    return 16 + 36 * level(r) + 6 * level(g) + level(b)
+
+
+def sgr(fg, bg):
+    def part(c, layer, default):
+        if c is None:
+            return default
+        if TRUECOLOR:
+            return f'{layer};2;{c >> 16 & 255};{c >> 8 & 255};{c & 255}'
+        return f'{layer};5;{xterm256(c)}'
+    return f'\x1b[{part(fg, 38, "39")};{part(bg, 48, "49")}m'
+
+
+def encode(row):
+    out, cur = [], (KEEP, KEEP)
+    for ch, fg, bg in row:
+        if (fg, bg) != cur:
+            out.append(sgr(fg, bg))
+            cur = (fg, bg)
+        out.append(ch)
+    out.append('\x1b[0m')
+    return ''.join(out)
+
+
+# ---------- Terminal ----------
+
+MOUSE = re.compile(r'\x1b\[<(\d+);(\d+);(\d+)([Mm])')
+
+
+def write(s):
+    sys.stdout.write(s)
+    sys.stdout.flush()
+
+
+class WindowsConsole:
+    """Raw VT input and output on a Windows console (Windows Terminal, conhost)."""
+
+    VT_INPUT, EXTENDED_FLAGS = 0x0200, 0x0080
+    PROCESSED_OUTPUT, VT_OUTPUT, NO_AUTO_RETURN = 0x0001, 0x0004, 0x0008
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+        self.ctypes, self.wintypes = ctypes, wintypes
+        self.k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        self.hin, self.hout = self.k32.GetStdHandle(-10), self.k32.GetStdHandle(-11)
+        self.mode_in, self.mode_out = wintypes.DWORD(), wintypes.DWORD()
+
+    def enter(self):
+        k32, byref = self.k32, self.ctypes.byref
+        k32.GetConsoleMode(self.hin, byref(self.mode_in))
+        k32.GetConsoleMode(self.hout, byref(self.mode_out))
+        # no line editing, no echo, no quick-edit selection eating the clicks
+        k32.SetConsoleMode(self.hin, self.VT_INPUT | self.EXTENDED_FLAGS)
+        k32.SetConsoleMode(self.hout, self.mode_out.value | self.PROCESSED_OUTPUT
+                           | self.VT_OUTPUT | self.NO_AUTO_RETURN)
+        k32.SetConsoleOutputCP(65001)
+
+    def leave(self):
+        self.k32.SetConsoleMode(self.hin, self.mode_in.value)
+        self.k32.SetConsoleMode(self.hout, self.mode_out.value)
+
+    def read(self, q):
+        buf = self.ctypes.create_unicode_buffer(1024)
+        n = self.wintypes.DWORD()
+        while self.k32.ReadConsoleW(self.hin, buf, 1024, self.ctypes.byref(n), None):
+            q.put(buf[:n.value])
+
+
+class PosixConsole:
+    """Raw mode on a Unix tty (macOS, Linux, WSL, tmux)."""
+
+    def __init__(self):
+        import termios
+        self.termios = termios
+        self.fd = sys.stdin.fileno()
+        self.saved = None
+
+    def enter(self):
+        import tty
+        self.saved = self.termios.tcgetattr(self.fd)
+        tty.setraw(self.fd)
+
+    def leave(self):
+        if self.saved:
+            self.termios.tcsetattr(self.fd, self.termios.TCSADRAIN, self.saved)
+
+    def read(self, q):
+        while True:
+            data = os.read(self.fd, 1024)
+            if not data:
+                break
+            q.put(data.decode('utf-8', 'ignore'))
+
+
+def events(chunk):
+    """Clicks as (x, y) zero-based, and 'quit' for q or Ctrl+C."""
+    for m in MOUSE.finditer(chunk):
+        b, x, y, kind = int(m[1]), int(m[2]), int(m[3]), m[4]
+        if kind == 'M' and b & 3 == 0 and not b & (32 | 64):
+            yield (x - 1, y - 1)
+    rest = MOUSE.sub('', chunk)
+    if 'q' in rest or 'Q' in rest or '\x03' in rest:
+        yield 'quit'
+
+
+def play():
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        sys.exit('O cassino precisa de um terminal.')
+    sys.stdout.reconfigure(encoding='utf-8')
+    console = WindowsConsole() if os.name == 'nt' else PosixConsole()
+    console.enter()
+    write('\x1b]0;Cassino\x07\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J')
+
+    game = Casino.load()
+    q = queue.Queue()
+    threading.Thread(target=console.read, args=(q,), daemon=True).start()
+    prev, size, hits, dirty = None, None, [], True
+    try:
+        while True:
+            if game.tick(time.monotonic()):
+                dirty = True
+            now_size = shutil.get_terminal_size()
+            if now_size != size:
+                size, prev, dirty = now_size, None, True
+                write('\x1b[0m\x1b[2J')
+            if dirty:
+                # one row short of the bottom, so the last cell never scrolls
+                scr = layout(game, size.columns, max(1, size.lines - 1))
+                rows = [encode(r) for r in scr.cells]
+                write('\x1b[?2026h' + ''.join(
+                    f'\x1b[{y + 1};1H{line}' for y, line in enumerate(rows)
+                    if prev is None or prev[y] != line) + '\x1b[?2026l')
+                prev, hits, dirty = rows, scr.hits, False
+            try:
+                chunk = q.get(timeout=0.02)
+            except queue.Empty:
+                continue
+            for ev in events(chunk):
+                if ev == 'quit':
+                    return
+                x, y = ev
+                for x0, x1, yy, action in hits:
+                    if yy == y and x0 <= x < x1:
+                        if action() == 'quit':
+                            return
+                        dirty = True
+                        break
+    finally:
+        game.finish()
+        game.save()
+        write('\x1b[?1000l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l')
+        console.leave()
+
+
+# ---------- Painel ao lado ----------
+
+def side_pane_commands(cmd):
+    """How each terminal that can split opens `cmd` in a pane at the right."""
+    env = os.environ
+    found = []
+    if env.get('TMUX'):
+        found.append(['tmux', 'split-window', '-h', '-l', '34%', *cmd])
+    if env.get('ZELLIJ'):
+        found.append(['zellij', 'run', '--direction', 'right', '--close-on-exit', '--', *cmd])
+    if env.get('WEZTERM_PANE'):
+        found.append(['wezterm', 'cli', 'split-pane', '--right', '--percent', '34', '--', *cmd])
+    if env.get('KITTY_WINDOW_ID'):
+        found.append(['kitten', '@', 'launch', '--location=vsplit', '--title', 'Cassino', *cmd])
+    if env.get('WT_SESSION'):
+        found.append(['wt', '-w', '0', 'split-pane', '-V', '-s', '0.32', '--title', 'Cassino', *cmd])
+    return found
+
+
+def open_beside():
+    """Opens the game in a split at the right; False where no split worked."""
+    cmd = [sys.executable, os.path.abspath(__file__)]
+    for argv in side_pane_commands(cmd):
+        try:
+            done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if done.returncode == 0:
+            return True
+    return False
+
+
+def main():
+    if '--lado' in sys.argv[1:] and open_beside():
+        return
+    try:
+        play()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == '__main__':
+    main()
