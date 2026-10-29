@@ -1,18 +1,46 @@
 import type { Register } from 'claude-code'
 
-// The casino itself is app/cassino.py, run in the person's own terminal: a
-// session cannot open a pane in their window, so the command points the way.
+// The casino plays in a pane of Claude Code's own, beside the chat: mesa.tsx
+// draws the game and posts the balance here, which keeps it across sessions.
+const PANE = 'cassino'
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'cassino',
-      description: 'Como abrir o mini cassino ao lado do terminal',
+      description: 'Abre o mini cassino num painel ao lado do chat',
     })
 
     return next(e)
   })
 
-  on('command.run', { command: 'cassino' }, async () => ({
-    text: 'Rode cassino/app/cassino.py --lado com python (python3 no Mac), ou o comando cassino se você criou o alias (no Windows Terminal, também Ctrl+Shift+K): ele abre à direita no Windows Terminal, iTerm2, Terminal do macOS, tmux, WezTerm, kitty e Zellij, e na própria janela nos outros. Tudo no mouse; para fechar, clique em Sair.',
-  }))
+  on('command.run', { command: 'cassino' }, async ($, e) => {
+    await $.ui.open({ id: PANE, title: 'Cassino', columns: 34 })
+
+    return {
+      text: e.presentation?.isFullscreen
+        ? 'Cassino aberto ao lado do chat. Tudo no mouse; para fechar, clique em Sair.'
+        : 'Cassino aberto acima do prompt. Para tê-lo ao lado do chat e jogar com o mouse, rode /tui fullscreen e depois /cassino de novo.',
+    }
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const els = $.ui.resolve(e)
+    if (!('Client' in els)) {
+      const { Text } = els
+      return <Text dimColor>O cassino abre no terminal ou no app desktop.</Text>
+    }
+    const { Client } = els
+
+    return <Client key="mesa" module="./mesa.tsx" props={{ save: (await $.store.get('save')) ?? {} }} height={28} width="100%" />
+  })
+
+  on('ui.message', async ($, e, next) => {
+    if (e.requestId !== PANE) return next(e)
+    const data = e.data as { save?: unknown; quit?: boolean }
+    if (data.save) await $.store.set('save', data.save)
+    if (data.quit) await $.ui.close({ id: PANE })
+
+    return {}
+  })
 }

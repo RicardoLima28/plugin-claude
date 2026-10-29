@@ -2,9 +2,15 @@
 
 Um mini cassino em pixel art para jogar no terminal com fichas fictícias, enquanto o Claude trabalha. Tem roleta (vermelho, preto ou verde), blackjack e caça-níquel. Tudo funciona com o mouse e o saldo fica salvo entre as sessões.
 
-O jogo é o arquivo `app/cassino.py`. Ele usa só a biblioteca padrão do Python 3.8 ou mais novo e roda no Windows, no macOS e no Linux.
+## Como abrir: painel ao lado do chat
 
-## Como abrir
+No Claude Code, digite `/cassino`. O cassino abre num painel do próprio Claude Code, ao lado da conversa, no Windows, no macOS e no Linux, em qualquer terminal, sem Python e sem janela extra.
+
+Para o painel ficar ao lado do chat e aceitar cliques, o Claude Code precisa estar no modo tela cheia: rode `/tui fullscreen` uma vez. Com a janela do terminal estreita (menos de 110 colunas), o painel abre acima do prompt. Para fechar, clique em Sair ou aperte Ctrl+X X.
+
+## Como abrir: fora do Claude Code
+
+O jogo também existe como o arquivo `app/cassino.py`, que usa só a biblioteca padrão do Python 3.8 ou mais novo e roda no Windows, no macOS e no Linux:
 
 ```
 python app/cassino.py --lado
@@ -57,8 +63,8 @@ O cassino usa cores de 24 bits quando o terminal tem suporte e 256 cores nos out
 
 ## Saldo
 
-O saldo fica em `~/.claude/cassino-save.json`. Para recomeçar, apague esse arquivo.
+No painel, o saldo fica guardado pelo próprio Claude Code. No `app/cassino.py`, ele fica em `~/.claude/cassino-save.json`; para recomeçar, apague esse arquivo. Os dois saldos são separados.
 
 ## Plugin do Claude Code
 
-A pasta também é um plugin do Claude Code. Ele cria o comando `/cassino`, que mostra como abrir o jogo. O Claude não abre painéis na janela do seu terminal; quem abre o cassino é você.
+A pasta também é um plugin do Claude Code. Ele cria o comando `/cassino`, que abre o painel: `hooks/register.tsx` abre o painel e guarda o saldo, e `hooks/mesa.tsx` desenha o jogo.
