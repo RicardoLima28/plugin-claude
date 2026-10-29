@@ -22,7 +22,9 @@ git clone https://github.com/RicardoLima28/plugin-claude
 python plugin-claude/cassino/app/cassino.py --lado
 ```
 
-Com `--lado`, ele abre num painel à direita no Windows Terminal, tmux, WezTerm, kitty e Zellij. Nos outros terminais, roda na própria janela.
+No macOS, use `python3` no lugar de `python`.
+
+Com `--lado`, ele abre num painel à direita no Windows Terminal, iTerm2, Terminal do macOS, tmux, WezTerm, kitty e Zellij. Nos outros terminais, roda na própria janela.
 
 ## Estrutura
 

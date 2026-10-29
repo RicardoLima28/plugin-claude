@@ -13,6 +13,6 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'cassino' }, async () => ({
-    text: 'Digite cassino em qualquer terminal (no Windows Terminal, também Ctrl+Shift+K): ele abre num painel à direita quando o terminal deixa, senão na própria janela. Tudo no mouse; para fechar, clique em Sair.',
+    text: 'Rode cassino/app/cassino.py --lado com python (python3 no Mac), ou o comando cassino se você criou o alias (no Windows Terminal, também Ctrl+Shift+K): ele abre à direita no Windows Terminal, iTerm2, Terminal do macOS, tmux, WezTerm, kitty e Zellij, e na própria janela nos outros. Tudo no mouse; para fechar, clique em Sair.',
   }))
 }

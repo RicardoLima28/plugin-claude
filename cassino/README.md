@@ -10,17 +10,23 @@ O jogo é o arquivo `app/cassino.py`. Ele usa só a biblioteca padrão do Python
 python app/cassino.py --lado
 ```
 
+No macOS, use `python3` no lugar de `python`.
+
 Com `--lado`, o cassino abre num painel à direita nos terminais que deixam dividir a janela:
 
 | Terminal | Como divide |
 | --- | --- |
 | Windows Terminal | `wt split-pane` (também pelo atalho Ctrl+Shift+K, veja abaixo) |
+| iTerm2 | divide a janela com AppleScript |
+| Terminal do macOS | encolhe a janela e abre outra colada à direita (não tem painel lado a lado) |
 | tmux | `tmux split-window` |
 | WezTerm | `wezterm cli split-pane` |
 | kitty | `kitten @ launch` (precisa de `allow_remote_control yes`) |
 | Zellij | `zellij run` |
 
-Nos outros terminais (VS Code, Cursor, iTerm2, Terminal do macOS, GNOME Terminal, cmd), ele roda na própria janela. Para tê-lo do lado, divida o terminal primeiro e rode o comando no painel novo. No VS Code e no Cursor, o atalho para dividir é Ctrl+Shift+5.
+No iTerm2 e no Terminal do macOS, a primeira vez o macOS pergunta se o terminal pode controlar a si mesmo (Automação). Responda OK; se negar, o cassino roda na própria janela.
+
+Nos outros terminais (VS Code, Cursor, GNOME Terminal, cmd), ele roda na própria janela. Para tê-lo do lado, divida o terminal primeiro e rode o comando no painel novo. No VS Code e no Cursor, o atalho para dividir é Ctrl+Shift+5.
 
 Sem `--lado`, ele sempre roda na janela atual.
 

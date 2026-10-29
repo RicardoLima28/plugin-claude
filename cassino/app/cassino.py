@@ -3,8 +3,9 @@
 
     python cassino.py          roda nesta janela
     python cassino.py --lado   abre num painel à direita quando o terminal
-                               deixa (Windows Terminal, tmux, WezTerm, kitty,
-                               Zellij); nos outros, roda nesta janela
+                               deixa (Windows Terminal, iTerm2, Terminal do
+                               macOS, tmux, WezTerm, kitty, Zellij); nos
+                               outros, roda nesta janela
 
 Funciona no Windows, no macOS e no Linux, só com a biblioteca padrão.
 Para sair, clique em Sair ou aperte q. CASSINO_CORES=256 força 256 cores.
@@ -16,6 +17,7 @@ import os
 import queue
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -819,6 +821,26 @@ def play():
 
 # ---------- Painel ao lado ----------
 
+# iTerm2 splits the current session; the new pane runs the game and closes with it.
+ITERM_SPLIT = '''on run argv
+  tell application "iTerm2" to tell current session of current window
+    split vertically with default profile command (item 1 of argv)
+  end tell
+end run'''
+
+# Terminal.app has no side panes: the current window gives up its right 32%
+# to a new window that runs the game, so the two sit together like a split.
+TERMINAL_SPLIT = '''on run argv
+  tell application "Terminal"
+    set b to bounds of front window
+    set cut to (item 3 of b) - (round (((item 3 of b) - (item 1 of b)) * 32 / 100))
+    set bounds of front window to {item 1 of b, item 2 of b, cut, item 4 of b}
+    do script "exec " & (item 1 of argv)
+    set bounds of front window to {cut, item 2 of b, item 3 of b, item 4 of b}
+  end tell
+end run'''
+
+
 def side_pane_commands(cmd):
     """How each terminal that can split opens `cmd` in a pane at the right."""
     env = os.environ
@@ -833,6 +855,11 @@ def side_pane_commands(cmd):
         found.append(['kitten', '@', 'launch', '--location=vsplit', '--title', 'Cassino', *cmd])
     if env.get('WT_SESSION'):
         found.append(['wt', '-w', '0', 'split-pane', '-V', '-s', '0.32', '--title', 'Cassino', *cmd])
+    line = ' '.join(shlex.quote(a) for a in cmd)
+    if env.get('TERM_PROGRAM') == 'iTerm.app':
+        found.append(['osascript', '-e', ITERM_SPLIT, line])
+    if env.get('TERM_PROGRAM') == 'Apple_Terminal':
+        found.append(['osascript', '-e', TERMINAL_SPLIT, line])
     return found
 
 
