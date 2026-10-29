@@ -27,12 +27,23 @@ import time
 SAVE = os.path.join(os.path.expanduser('~'), '.claude', 'cassino-save.json')
 rng = random.SystemRandom()
 TAU = 2 * math.pi
-BETS = [10, 25, 50, 100, 250, 500, 1000]
+MIN_BET = 10
 START = 1000
 
 
 def money(n):
     return f'{round(n):,}'.replace(',', '.')
+
+
+def ladder(top):
+    """The bet steps up to top: 10, 25, 50, 100, 250, 500, 1.000, 2.500..."""
+    out, p = [], MIN_BET
+    while True:
+        for m in (1, 2.5, 5):
+            if m * p > top:
+                return out
+            out.append(int(m * p))
+        p *= 10
 
 
 # ---------- Roleta (europeia, um zero) ----------
@@ -99,6 +110,7 @@ class Casino:
     def __init__(self):
         self.coins = START
         self.bet = 50
+        self.all_in = False
         self.tab = 'roleta'
         self.msg = 'Bem-vindo! Escolha uma aposta.'
         self.tone = None
@@ -117,7 +129,9 @@ class Casino:
             with open(SAVE, encoding='utf-8') as f:
                 data = json.load(f)
             game.coins = int(data.get('coins', START))
-            game.bet = data.get('bet', 50) if data.get('bet') in BETS else 50
+            bet = data.get('bet')
+            game.bet = bet if isinstance(bet, (int, float)) and bet >= MIN_BET else 50
+            game.all_in = data.get('allIn') is True
             game.tab = data.get('tab', 'roleta')
             game.r['history'] = list(data.get('history', []))[:12]
             game.msg = f'Bem-vindo de volta! Saldo {money(game.coins)}.'
@@ -128,22 +142,36 @@ class Casino:
     def save(self):
         os.makedirs(os.path.dirname(SAVE), exist_ok=True)
         with open(SAVE, 'w', encoding='utf-8') as f:
-            json.dump({'coins': self.coins, 'bet': self.bet, 'tab': self.tab,
+            json.dump({'coins': self.coins, 'bet': self.bet, 'allIn': self.all_in, 'tab': self.tab,
                        'history': self.r['history']}, f)
 
     def say(self, msg, tone=None):
         self.msg, self.tone = msg, tone
 
+    def stake(self):
+        """What the next round puts down: the whole balance all in, and never more than it."""
+        return self.coins if self.all_in else min(self.bet, self.coins)
+
     def take_bet(self):
-        if self.coins < self.bet:
-            self.say('Fichas insuficientes: baixe a aposta.', 'lose')
-            return False
-        self.coins -= self.bet
-        return True
+        """Takes the stake from the balance and returns it, or 0 with no chips left."""
+        stake = self.stake()
+        if stake <= 0:
+            self.say('Sem fichas: peça mais à casa.', 'lose')
+            return 0
+        self.coins -= stake
+        return stake
 
     def shift_bet(self, d):
-        i = BETS.index(self.bet) if self.bet in BETS else 2
-        self.bet = BETS[max(0, min(len(BETS) - 1, i + d))]
+        now, steps = self.stake(), ladder(self.coins)
+        if d > 0:
+            nxt = next((v for v in steps if v > now), self.coins)
+        else:
+            nxt = next((v for v in reversed(steps) if v < now), now)
+        self.all_in = False
+        self.bet = max(nxt, MIN_BET)
+
+    def toggle_all_in(self):
+        self.all_in = not self.all_in
 
     def refill(self):
         self.coins += START
@@ -157,14 +185,17 @@ class Casino:
 
     def spin(self, pick):
         r = self.r
-        if r['spinning'] or not self.take_bet():
+        if r['spinning']:
+            return
+        stake = self.take_bet()
+        if not stake:
             return
         result = rng.randrange(len(WHEEL))
         wfrom = r['wto'] % TAU
         wto = wfrom + TAU * (1.5 + rng.random())
         r.update(spinning=True, frame=0, wfrom=wfrom, wto=wto, ballto=wto + result * POCKET,
-                 result=result, pick=pick, stake=self.bet)
-        self.say(f'Girando... {money(self.bet)} no {NAME[pick]}')
+                 result=result, pick=pick, stake=stake)
+        self.say(f'{"ALL IN! " if self.all_in else ""}Girando... {money(stake)} no {NAME[pick]}')
 
     def step_roulette(self):
         r = self.r
@@ -188,10 +219,13 @@ class Casino:
 
     def deal(self):
         bj = self.bj
-        if bj['phase'] in ('play', 'dealer') or not self.take_bet():
+        if bj['phase'] in ('play', 'dealer'):
+            return
+        stake = self.take_bet()
+        if not stake:
             return
         bj.update(phase='play', player=[draw_card(), draw_card()],
-                  dealer=[draw_card(), draw_card()], hide=True, stake=self.bet)
+                  dealer=[draw_card(), draw_card()], hide=True, stake=stake)
         if natural(bj['player']) or natural(bj['dealer']):
             self.settle()
         else:
@@ -269,7 +303,10 @@ class Casino:
 
     def pull(self):
         sl = self.sl
-        if sl['spinning'] or not self.take_bet():
+        if sl['spinning']:
+            return
+        stake = self.take_bet()
+        if not stake:
             return
         # each strip starts at the symbol on show and ends at the new one;
         # the later reels have longer strips, so they stop one after another
@@ -278,8 +315,8 @@ class Casino:
             strip = [old[-1]] + [rng.randrange(len(SYMBOLS)) for _ in range(16 + i * 6)]
             strip.append(rng.choices(range(len(SYMBOLS)), WEIGHTS)[0])
             strips.append(strip)
-        sl.update(spinning=True, frame=0, strips=strips, stake=self.bet)
-        self.say(f'Girando... {money(self.bet)}')
+        sl.update(spinning=True, frame=0, strips=strips, stake=stake)
+        self.say(f'{"ALL IN! " if self.all_in else ""}Girando... {money(stake)}')
 
     def step_slots(self):
         sl = self.sl
@@ -608,8 +645,16 @@ def layout(game, w, h):
 
     def bet(d):
         return lambda: (game.shift_bet(d), game.save())
-    scr.row(y, [(' - ', bet(-1), 0xffffff, BTN_BG), (f'aposta {money(game.bet)}', None, GOLD, None),
-                (' + ', bet(1), 0xffffff, BTN_BG)])
+
+    def all_in():
+        game.toggle_all_in()
+        game.save()
+    # the buttons, the gaps and the label's padding take 19 columns; a long balance drops the word
+    stake = f'aposta {money(game.stake())}'
+    if len(stake) + 19 > w:
+        stake = f'● {money(game.stake())}'
+    scr.row(y, [('-', bet(-1), 0xffffff, BTN_BG), (stake, None, GOLD, None), ('+', bet(1), 0xffffff, BTN_BG),
+                ('ALL IN', all_in, 0xffffff, 0xa61e4d) if game.all_in else ('All in', all_in, 0x111111, GOLD)])
     y += 2
 
     tone = {'win': 0x51cf66, 'lose': 0xff6b6b}.get(game.tone, 0xdee2e6)
@@ -619,7 +664,7 @@ def layout(game, w, h):
     y += 1
 
     items = []
-    if game.coins < BETS[0] and not game.busy():
+    if game.coins < MIN_BET and not game.busy():
         items.append((f'+{money(START)} fichas', game.refill, 0x111111, GOLD))
     items.append(('Sair', lambda: 'quit', 0xffffff, 0x862e2e))
     scr.row(max(y, h - 1), items)
