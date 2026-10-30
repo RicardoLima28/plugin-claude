@@ -4,7 +4,7 @@ import type { ClientModule, ClientSurface } from 'claude-code'
 // art and its layout, with clicks from onPointer and frames from every().
 
 const TAU = 2 * Math.PI
-const BETS = [10, 25, 50, 100, 250, 500, 1000]
+const MIN_BET = 10
 const START = 1000
 const ROWS = 28
 const TICK = 15
@@ -12,13 +12,24 @@ const TICK = 15
 type Tab = 'roleta' | 'blackjack' | 'slots'
 type Pick = 'red' | 'black' | 'green'
 type Card = [number, number]
-export type Save = { coins: number; bet: number; tab: Tab; history: number[] }
+export type Save = { coins: number; bet: number; allIn: boolean; tab: Tab; history: number[] }
 
 const mod = (a: number, n: number) => ((a % n) + n) % n
 const randrange = (n: number) => Math.floor(Math.random() * n)
 
 function money(n: number) {
   return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+}
+
+/** The bet steps up to max: 10, 25, 50, 100, 250, 500, 1.000, 2.500... */
+function ladder(max: number) {
+  const out: number[] = []
+  for (let p = MIN_BET; ; p *= 10) {
+    for (const m of [1, 2.5, 5]) {
+      if (m * p > max) return out
+      out.push(m * p)
+    }
+  }
 }
 
 // ---------- Roleta (europeia, um zero) ----------
@@ -84,6 +95,7 @@ function payout([a, b, c]: number[]) {
 class Casino {
   coins = START
   bet = 50
+  allIn = false
   tab: Tab = 'roleta'
   msg = 'Bem-vindo! Escolha uma aposta.'
   tone: 'win' | 'lose' | null = null
@@ -97,7 +109,8 @@ class Casino {
   constructor(public onSave: (save: Save) => void, saved?: Partial<Save>) {
     if (saved && typeof saved.coins === 'number') {
       this.coins = saved.coins
-      this.bet = BETS.includes(saved.bet as number) ? (saved.bet as number) : 50
+      this.bet = typeof saved.bet === 'number' && saved.bet >= MIN_BET ? saved.bet : 50
+      this.allIn = saved.allIn === true
       this.tab = saved.tab ?? 'roleta'
       this.r.history = (saved.history ?? []).slice(0, 12)
       this.msg = `Bem-vindo de volta! Saldo ${money(this.coins)}.`
@@ -107,7 +120,8 @@ class Casino {
   // ----- saldo -----
 
   save() {
-    this.onSave({ coins: this.coins, bet: this.bet, tab: this.tab, history: this.r.history })
+    this.onSave({ coins: this.coins, bet: this.bet, allIn: this.allIn, tab: this.tab,
+                  history: this.r.history })
   }
 
   say(msg: string, tone: 'win' | 'lose' | null = null) {
@@ -115,18 +129,32 @@ class Casino {
     this.tone = tone
   }
 
+  /** What the next round puts down: the whole balance all in, and never more than it. */
+  stake() {
+    return this.allIn ? this.coins : Math.min(this.bet, this.coins)
+  }
+
+  /** Takes the stake from the balance and returns it, or 0 with no chips left. */
   takeBet() {
-    if (this.coins < this.bet) {
-      this.say('Fichas insuficientes: baixe a aposta.', 'lose')
-      return false
+    const stake = this.stake()
+    if (stake <= 0) {
+      this.say('Sem fichas: peça mais à casa.', 'lose')
+      return 0
     }
-    this.coins -= this.bet
-    return true
+    this.coins -= stake
+    return stake
   }
 
   shiftBet(d: number) {
-    const i = BETS.includes(this.bet) ? BETS.indexOf(this.bet) : 2
-    this.bet = BETS[Math.max(0, Math.min(BETS.length - 1, i + d))]
+    const now = this.stake()
+    const steps = ladder(this.coins)
+    const next = d > 0 ? steps.find(v => v > now) ?? this.coins : steps.reverse().find(v => v < now) ?? now
+    this.allIn = false
+    this.bet = Math.max(next, MIN_BET)
+  }
+
+  toggleAllIn() {
+    this.allIn = !this.allIn
   }
 
   refill() {
@@ -143,13 +171,15 @@ class Casino {
 
   spin(pick: Pick) {
     const r = this.r
-    if (r.spinning || !this.takeBet()) return
+    if (r.spinning) return
+    const stake = this.takeBet()
+    if (!stake) return
     const result = randrange(WHEEL.length)
     const wfrom = mod(r.wto, TAU)
     const wto = wfrom + TAU * (1.5 + Math.random())
     Object.assign(r, { spinning: true, frame: 0, wfrom, wto, ballto: wto + result * POCKET,
-                       result, pick, stake: this.bet })
-    this.say(`Girando... ${money(this.bet)} no ${NAME[pick]}`)
+                       result, pick, stake })
+    this.say(`${this.allIn ? 'ALL IN! ' : ''}Girando... ${money(stake)} no ${NAME[pick]}`)
   }
 
   stepRoulette() {
@@ -172,9 +202,11 @@ class Casino {
 
   deal() {
     const bj = this.bj
-    if (bj.phase === 'play' || bj.phase === 'dealer' || !this.takeBet()) return
+    if (bj.phase === 'play' || bj.phase === 'dealer') return
+    const stake = this.takeBet()
+    if (!stake) return
     Object.assign(bj, { phase: 'play', player: [drawCard(), drawCard()],
-                        dealer: [drawCard(), drawCard()], hide: true, stake: this.bet })
+                        dealer: [drawCard(), drawCard()], hide: true, stake })
     if (natural(bj.player) || natural(bj.dealer)) this.settle()
     else this.say(`Sua mão: ${total(bj.player)}. Pedir ou parar?`)
   }
@@ -244,7 +276,9 @@ class Casino {
 
   pull() {
     const sl = this.sl
-    if (sl.spinning || !this.takeBet()) return
+    if (sl.spinning) return
+    const stake = this.takeBet()
+    if (!stake) return
     // each strip starts at the symbol on show and ends at the new one;
     // the later reels have longer strips, so they stop one after another
     const strips = sl.strips.map((old, i) => [
@@ -252,8 +286,8 @@ class Casino {
       ...Array.from({ length: 16 + i * 6 }, () => randrange(SYMBOLS.length)),
       weighted(),
     ])
-    Object.assign(sl, { spinning: true, frame: 0, strips, stake: this.bet })
-    this.say(`Girando... ${money(this.bet)}`)
+    Object.assign(sl, { spinning: true, frame: 0, strips, stake })
+    this.say(`${this.allIn ? 'ALL IN! ' : ''}Girando... ${money(stake)}`)
   }
 
   stepSlots() {
@@ -587,8 +621,12 @@ function layout(game: Casino, w: number, h: number) {
   }
 
   const bet = (d: number) => () => { game.shiftBet(d); game.save() }
-  scr.row(y, [[' - ', bet(-1), 0xffffff, BTN_BG], [`aposta ${money(game.bet)}`, null, GOLD, null],
-              [' + ', bet(1), 0xffffff, BTN_BG]])
+  const allIn = () => { game.toggleAllIn(); game.save() }
+  // the buttons, the gaps and the label's padding take 19 columns; a long balance drops the word
+  let stake = `aposta ${money(game.stake())}`
+  if (stake.length + 19 > w) stake = `● ${money(game.stake())}`
+  scr.row(y, [['-', bet(-1), 0xffffff, BTN_BG], [stake, null, GOLD, null], ['+', bet(1), 0xffffff, BTN_BG],
+              game.allIn ? ['ALL IN', allIn, 0xffffff, 0xa61e4d] : ['All in', allIn, 0x111111, GOLD]])
   y += 2
 
   const tone = game.tone === 'win' ? 0x51cf66 : game.tone === 'lose' ? 0xff6b6b : 0xdee2e6
@@ -599,7 +637,7 @@ function layout(game: Casino, w: number, h: number) {
   y += 1
 
   const items: Item[] = []
-  if (game.coins < BETS[0] && !game.busy()) items.push([`+${money(START)} fichas`, () => game.refill(), 0x111111, GOLD])
+  if (game.coins < MIN_BET && !game.busy()) items.push([`+${money(START)} fichas`, () => game.refill(), 0x111111, GOLD])
   items.push(['Sair', () => 'quit', 0xffffff, 0x862e2e])
   scr.row(Math.max(y, h - 1), items)
   return scr

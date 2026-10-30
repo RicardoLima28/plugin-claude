@@ -2,6 +2,8 @@
 
 Um mini cassino em pixel art para jogar no terminal com fichas fictícias, enquanto o Claude trabalha. Tem roleta (vermelho, preto ou verde), blackjack e caça-níquel. Tudo funciona com o mouse e o saldo fica salvo entre as sessões.
 
+A aposta sobe e desce com `+` e `-` (10, 25, 50, 100, 250, 500, 1.000, 2.500...) e nunca passa do seu saldo: o limite é o que você tem. O botão All in aposta o saldo inteiro em cada rodada até você clicar nele de novo ou mexer na aposta.
+
 ## Como abrir: painel ao lado do chat
 
 No Claude Code, digite `/cassino`. O cassino abre num painel do próprio Claude Code, ao lado da conversa, no Windows, no macOS e no Linux, em qualquer terminal, sem Python e sem janela extra.

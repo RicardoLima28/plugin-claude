@@ -58,6 +58,29 @@ test('a click on Vermelho spins the wheel and the balance is saved', async ($, o
   await again.unmount()
 })
 
+test('the bet never passes the balance and All in puts it all down', async ($, on) => {
+  mock.store(on, { save: { coins: 300, bet: 1000, tab: 'roleta', history: [] } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.resize({ columns: 34, rows: 28, in: 'mesa' })
+  const shown = async (text: RegExp) => (await ui.find({ type: 'Text', text, in: 'mesa' }))?.text
+
+  // the bet row sits at y 21: '-' x 2-4, 'aposta 300' x 6-17, '+' x 19-21, 'All in' x 23-30
+  expect((await shown(/aposta/))?.trim()).toBe('aposta 300')
+  await ui.pointer({ type: 'down', x: 20, y: 21, button: 'left', in: 'mesa' })
+  expect((await shown(/aposta/))?.trim()).toBe('aposta 300')
+  await ui.pointer({ type: 'down', x: 3, y: 21, button: 'left', in: 'mesa' })
+  expect((await shown(/aposta/))?.trim()).toBe('aposta 250')
+
+  // 'aposta 250' keeps the row where it was, so All in still sits at x 23-30
+  await ui.pointer({ type: 'down', x: 26, y: 21, button: 'left', in: 'mesa' })
+  expect((await shown(/aposta/))?.trim()).toBe('aposta 300')
+  expect(await shown(/^ ALL IN $/)).toBeDefined()
+  await ui.pointer({ type: 'down', x: 6, y: 18, button: 'left', in: 'mesa' })
+  expect(await shown(/fichas/)).toBe('● 0 fichas')
+  expect(await shown(/Girando/)).toContain('ALL IN! Girando... 300 no')
+  await ui.unmount()
+})
+
 test('Sair closes the pane', async ($, on) => {
   mock.store(on)
   const closed: string[] = []
