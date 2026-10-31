@@ -67,6 +67,14 @@ function total(hand: Card[]) {
 
 const natural = (hand: Card[]) => hand.length === 2 && total(hand) === 21
 
+// a card turning over plays one look per frame: 'b' its back, 'f' its face, 's' its face
+// in a flash, 'o' the face it had before, each with the columns it takes, and 'e' its edge
+type Flip = { f: number; seq: string[]; old?: Card }
+const UP = ['b3', 'e', 'f3', 's5']
+const DOWN = ['o3', 'e', 'b3']
+const FLIP_DT = 45
+const FLIP_GAP = 3
+
 // ---------- Caça-níquel ----------
 
 const SYMBOLS = ['cereja', 'limão', 'sino', 'estrela', 'sete', 'diamante']
@@ -74,7 +82,7 @@ const WEIGHTS = [30, 25, 18, 12, 8, 4]
 const TRIPLE = [5, 15, 25, 50, 100, 250]
 const PITCH = 10
 const STOPS = [28, 40, 52]
-const S_FRAMES = 52
+const TENSION = 30
 const S_DT = 45
 
 function weighted() {
@@ -127,6 +135,15 @@ function rankHand(hand: Card[]) {
   return -1
 }
 
+// ---------- Efeitos ----------
+
+const FX_DT = 50
+const PARTY = 28
+const BIG = 9
+const CHEER = [0xffd43b, 0x51cf66, 0xffffff, 0xff922b]
+const CHIPS = '●✦◆$'
+const CHIP_COLORS = [0xffd43b, 0xfcc419, 0xff922b, 0xfff3bf]
+
 class Casino {
   coins = START
   bet = 50
@@ -138,9 +155,14 @@ class Casino {
         pick: 'red' as Pick, stake: 0, history: [] as number[] }
   bj = { phase: 'bet' as 'bet' | 'play' | 'dealer' | 'done', dealer: [] as Card[],
          player: [] as Card[], hide: false, stake: 0 }
-  sl = { spinning: false, frame: S_FRAMES, strips: [[4], [4], [4]], stake: 0 }
-  pk = { phase: 'bet' as 'bet' | 'draw' | 'done', hand: [] as Card[], held: [] as boolean[],
+  sl = { spinning: false, frame: STOPS[2], strips: [[4], [4], [4]], stake: 0, stops: STOPS, tension: false }
+  pk = { phase: 'bet' as 'bet' | 'draw' | 'reveal' | 'done', hand: [] as Card[], held: [] as boolean[],
          deck: [] as Card[], stake: 0, rank: -1 }
+  flips: Record<string, Flip> = {}
+  then: (() => void) | null = null
+  party = 0
+  rain: { x: number; y: number; v: number; ch: string; c: number }[] = []
+  shown = START
   due: Record<string, number> = {}
 
   constructor(public onSave: (save: Save) => void, saved?: Partial<Save>) {
@@ -151,6 +173,7 @@ class Casino {
       this.tab = saved.tab ?? 'roleta'
       this.r.history = (saved.history ?? []).slice(0, 12)
       this.msg = `Bem-vindo de volta! Saldo ${money(this.coins)}.`
+      this.shown = this.coins
     }
   }
 
@@ -201,7 +224,62 @@ class Casino {
   }
 
   busy() {
-    return this.r.spinning || this.sl.spinning || this.bj.phase === 'dealer'
+    return this.r.spinning || this.sl.spinning || this.bj.phase === 'dealer' || this.pk.phase === 'reveal'
+      || this.flipping()
+  }
+
+  // ----- efeitos -----
+
+  /** Turns the cards at these slots over one after another, then runs done; with old, each
+   *  first turns its old face down. While they turn, the cards take no clicks. */
+  turn(slots: string[], done: () => void = () => {}, old?: Card[]) {
+    if (!slots.length) return done()
+    slots.forEach((s, i) => {
+      const seq = [...(old ? DOWN : []), ...Array<string>(i * FLIP_GAP + (old ? 2 : 0)).fill('b5'), ...UP]
+      this.flips[s] = { f: 0, seq, old: old?.[i] }
+    })
+    this.then = done
+  }
+
+  flipping() {
+    return Object.keys(this.flips).length > 0
+  }
+
+  stepFlips() {
+    for (const [s, flip] of Object.entries(this.flips)) if (++flip.f >= flip.seq.length) delete this.flips[s]
+    if (!this.flipping() && this.then) {
+      const done = this.then
+      this.then = null
+      done()
+    }
+  }
+
+  /** Lights a win up: blinking for any win, chips raining down for a big one. */
+  cheer(mult: number) {
+    this.party = PARTY
+    if (mult < BIG) return
+    for (let i = 0; i < 30; i++) {
+      this.rain.push({ x: Math.random(), y: -Math.random() * 10, v: 0.8 + Math.random() * 0.8,
+                       ch: CHIPS[randrange(CHIPS.length)], c: CHIP_COLORS[randrange(CHIP_COLORS.length)] })
+    }
+  }
+
+  effects() {
+    return this.party > 0 || this.rain.length > 0 || this.shown !== this.coins
+  }
+
+  stepFx() {
+    if (this.party > 0) this.party -= 1
+    for (const p of this.rain) p.y += p.v
+    this.rain = this.rain.filter(p => p.y < ROWS)
+    // the balance rolls up to a win, and drops to a bet at once
+    const gap = this.coins - this.shown
+    this.shown = gap <= 1 ? this.coins : this.shown + Math.ceil(gap * 0.3)
+  }
+
+  /** The balance on show: rolling up after a win, never above what there is. */
+  balance() {
+    return Math.min(this.shown, this.coins)
   }
 
   // ----- roleta -----
@@ -230,8 +308,12 @@ class Casino {
     this.coins += won
     r.history = [n, ...r.history.slice(0, 11)]
     const head = `Deu ${n} ${NAME[c]}!`
-    if (won) this.say(`${head} Ganhou +${money(won)}`, 'win')
-    else this.say(`${head} Perdeu ${money(r.stake)}`, 'lose')
+    if (won) {
+      this.say(`${head} Ganhou +${money(won)}`, 'win')
+      this.cheer(PAYS[c])
+    } else {
+      this.say(`${head} Perdeu ${money(r.stake)}`, 'lose')
+    }
     this.save()
   }
 
@@ -239,35 +321,41 @@ class Casino {
 
   deal() {
     const bj = this.bj
-    if (bj.phase === 'play' || bj.phase === 'dealer') return
+    if (bj.phase === 'play' || bj.phase === 'dealer' || this.flipping()) return
     const stake = this.takeBet()
     if (!stake) return
     Object.assign(bj, { phase: 'play', player: [drawCard(), drawCard()],
                         dealer: [drawCard(), drawCard()], hide: true, stake })
-    if (natural(bj.player) || natural(bj.dealer)) this.settle()
-    else this.say(`Sua mão: ${total(bj.player)}. Pedir ou parar?`)
+    this.say('Distribuindo...')
+    this.turn(['p0', 'd0', 'p1'], () => {
+      if (natural(bj.player) || natural(bj.dealer)) this.settle()
+      else this.say(`Sua mão: ${total(bj.player)}. Pedir ou parar?`)
+    })
   }
 
   hit() {
     const bj = this.bj
-    if (bj.phase !== 'play') return
+    if (bj.phase !== 'play' || this.flipping()) return
     bj.player.push(drawCard())
-    const s = total(bj.player)
-    if (s > 21) this.settle()
-    else if (s === 21) this.stand()
-    else this.say(`Sua mão: ${s}.`)
+    this.turn([`p${bj.player.length - 1}`], () => {
+      const s = total(bj.player)
+      if (s > 21) this.settle()
+      else if (s === 21) this.stand()
+      else this.say(`Sua mão: ${s}.`)
+    })
   }
 
   stand() {
     const bj = this.bj
-    if (bj.phase !== 'play') return
+    if (bj.phase !== 'play' || this.flipping()) return
     Object.assign(bj, { phase: 'dealer', hide: false })
     this.say('A banca revela a carta...')
+    this.turn(['d1'])
   }
 
   double() {
     const bj = this.bj
-    if (bj.phase !== 'play' || bj.player.length !== 2) return
+    if (bj.phase !== 'play' || bj.player.length !== 2 || this.flipping()) return
     if (this.coins < bj.stake) {
       this.say('Fichas insuficientes para dobrar.', 'lose')
       return
@@ -275,15 +363,14 @@ class Casino {
     this.coins -= bj.stake
     bj.stake *= 2
     bj.player.push(drawCard())
-    if (total(bj.player) > 21) this.settle()
-    else this.stand()
+    this.turn(['p2'], () => (total(bj.player) > 21 ? this.settle() : this.stand()))
   }
 
   stepDealer() {
     const bj = this.bj
     if (total(bj.dealer) < 17) {
       bj.dealer.push(drawCard())
-      this.say(`Banca compra: ${total(bj.dealer)}`)
+      this.turn([`d${bj.dealer.length - 1}`], () => this.say(`Banca compra: ${total(bj.dealer)}`))
     } else {
       this.settle()
     }
@@ -294,10 +381,12 @@ class Casino {
     const me = total(bj.player)
     const house = total(bj.dealer)
     const st = bj.stake
+    if (bj.hide) this.turn(['d1'])
     Object.assign(bj, { phase: 'done', hide: false })
     const pay = (mult: number, msg: string, tone: 'win' | 'lose' | null) => {
       this.coins += st * mult
       this.say(msg, tone)
+      if (tone === 'win') this.cheer(mult)
       this.save()
     }
     if (me > 21) pay(0, `Estourou com ${me}! Perdeu ${money(st)}`, 'lose')
@@ -317,20 +406,25 @@ class Casino {
     const stake = this.takeBet()
     if (!stake) return
     // each strip starts at the symbol on show and ends at the new one;
-    // the later reels have longer strips, so they stop one after another
+    // the later reels have longer strips, so they stop one after another,
+    // and when the first two match the last one keeps everyone waiting
+    const ends = [weighted(), weighted(), weighted()]
+    const tension = ends[0] === ends[1]
     const strips = sl.strips.map((old, i) => [
       old[old.length - 1],
-      ...Array.from({ length: 16 + i * 6 }, () => randrange(SYMBOLS.length)),
-      weighted(),
+      ...Array.from({ length: 16 + i * 6 + (tension && i === 2 ? 18 : 0) }, () => randrange(SYMBOLS.length)),
+      ends[i],
     ])
-    Object.assign(sl, { spinning: true, frame: 0, strips, stake })
+    const stops = [STOPS[0], STOPS[1], STOPS[2] + (tension ? TENSION : 0)]
+    Object.assign(sl, { spinning: true, frame: 0, strips, stake, stops, tension })
     this.say(`${this.allIn ? 'ALL IN! ' : ''}Girando... ${money(stake)}`)
   }
 
   stepSlots() {
     const sl = this.sl
     sl.frame += 1
-    if (sl.frame < S_FRAMES) return
+    if (sl.tension && sl.frame === sl.stops[1]) this.say('Dois iguais... segura!')
+    if (sl.frame < sl.stops[2]) return
     sl.spinning = false
     const faces = sl.strips.map(s => s[s.length - 1])
     const mult = payout(faces)
@@ -340,6 +434,7 @@ class Casino {
     else if (mult > 1) this.say(`Trinca de ${SYMBOLS[faces[0]]}! +${money(won)}`, 'win')
     else if (mult === 1) this.say('Duas cerejas: aposta de volta.', null)
     else this.say(`Nada dessa vez. Perdeu ${money(sl.stake)}`, 'lose')
+    if (mult > 1) this.cheer(mult)
     this.save()
   }
 
@@ -347,26 +442,40 @@ class Casino {
 
   dealPoker() {
     const pk = this.pk
-    if (pk.phase === 'draw') return
+    if (pk.phase === 'draw' || pk.phase === 'reveal' || this.flipping()) return
     const stake = this.takeBet()
     if (!stake) return
+    const old = pk.hand.length ? pk.hand : undefined
     const deck = shuffled()
     const hand = deck.splice(0, 5)
-    Object.assign(pk, { phase: 'draw', hand, held: hand.map(() => false), deck, stake, rank: rankHand(hand) })
-    this.say(pk.rank >= 0 ? `Você tem ${HANDS[pk.rank]}. Escolha as que ficam.`
-                          : 'Escolha as cartas que ficam e troque.')
+    Object.assign(pk, { phase: 'draw', hand, held: hand.map(() => false), deck, stake, rank: -1 })
+    this.say('Distribuindo...')
+    this.turn(hand.map((_, i) => `k${i}`), () => {
+      pk.rank = rankHand(hand)
+      this.say(pk.rank >= 0 ? `Você tem ${HANDS[pk.rank]}. Escolha as que ficam.`
+                            : 'Escolha as cartas que ficam e troque.')
+    }, old)
   }
 
   hold(i: number) {
     const pk = this.pk
-    if (pk.phase === 'draw') pk.held[i] = !pk.held[i]
+    if (pk.phase === 'draw' && !this.flipping()) pk.held[i] = !pk.held[i]
   }
 
-  /** Swaps the cards not held, once, and pays the hand by the table. */
+  /** Turns the cards not held face down and up again as new ones, then pays the hand. */
   swap() {
     const pk = this.pk
-    if (pk.phase !== 'draw') return
-    pk.hand = pk.hand.map((card, i) => (pk.held[i] ? card : pk.deck.pop()!))
+    if (pk.phase !== 'draw' || this.flipping()) return
+    const old = pk.hand
+    const out = [0, 1, 2, 3, 4].filter(i => !pk.held[i])
+    pk.hand = old.map((card, i) => (pk.held[i] ? card : pk.deck.pop()!))
+    pk.phase = 'reveal'
+    this.say('Virando...')
+    this.turn(out.map(i => `k${i}`), () => this.payPoker(), out.map(i => old[i]))
+  }
+
+  payPoker() {
+    const pk = this.pk
     pk.rank = rankHand(pk.hand)
     pk.phase = 'done'
     const won = pk.rank >= 0 ? pk.stake * HAND_PAYS[pk.rank] : 0
@@ -374,6 +483,7 @@ class Casino {
     if (pk.rank < 0) this.say(`Nada dessa vez. Perdeu ${money(pk.stake)}`, 'lose')
     else if (won === pk.stake) this.say(`${HANDS[pk.rank]}: aposta de volta.`, null)
     else this.say(`${pk.rank === 0 ? 'ROYAL FLUSH' : HANDS[pk.rank]}! +${money(won)}`, 'win')
+    if (won > pk.stake) this.cheer(HAND_PAYS[pk.rank])
     this.save()
   }
 
@@ -384,7 +494,10 @@ class Casino {
     const clocks: [string, boolean, number, () => void][] = [
       ['r', this.r.spinning, R_DT, () => this.stepRoulette()],
       ['s', this.sl.spinning, S_DT, () => this.stepSlots()],
-      ['d', this.bj.phase === 'dealer', DEALER_DT, () => this.stepDealer()],
+      ['f', this.flipping(), FLIP_DT, () => this.stepFlips()],
+      // the dealer waits for each card to land before the next
+      ['d', this.bj.phase === 'dealer' && !this.flipping(), DEALER_DT, () => this.stepDealer()],
+      ['x', this.effects(), FX_DT, () => this.stepFx()],
     ]
     for (const [key, running, dt, step] of clocks) {
       if (!running) {
@@ -404,8 +517,12 @@ class Casino {
   finish() {
     while (this.r.spinning) this.stepRoulette()
     while (this.sl.spinning) this.stepSlots()
-    while (this.bj.phase === 'dealer') this.stepDealer()
-    if (this.pk.phase === 'draw') this.swap()
+    for (;;) {
+      while (this.flipping()) this.stepFlips()
+      if (this.bj.phase === 'dealer') this.stepDealer()
+      else if (this.pk.phase === 'draw') this.swap()
+      else break
+    }
   }
 }
 
@@ -497,12 +614,22 @@ class Pixels {
 
 const POCKET_COLOR: Record<Pick, number> = { red: 0xd42a2a, black: 0x1c1c1c, green: 0x16a34a }
 
-function wheelArt(r: Casino['r'], size = 22) {
-  const p = new Pixels(size, size)
+function wheelAngles(r: Casino['r']) {
   const t = Math.min(1, r.frame / R_FRAMES)
   const e = 1 - (1 - t) ** 3
   const wheel = r.wfrom + (r.wto - r.wfrom) * e
-  const ball = r.ballto + (1 - e) * TAU * 3
+  return { t, wheel, ball: r.ballto + (1 - e) * TAU * 3 }
+}
+
+/** The number in the pocket under the ball: it rolls by while the wheel spins and stops on the result. */
+function ballNumber(r: Casino['r']) {
+  const { wheel, ball } = wheelAngles(r)
+  return WHEEL[mod(Math.round(mod(ball - wheel, TAU) / POCKET), WHEEL.length)]
+}
+
+function wheelArt(r: Casino['r'], party: number, size = 22) {
+  const p = new Pixels(size, size)
+  const { t, wheel, ball } = wheelAngles(r)
   const drop = t < 0.7 ? 0 : (t - 0.7) / 0.3
   const c = size / 2
   const R = size / 2
@@ -514,8 +641,11 @@ function wheelArt(r: Casino['r'], size = 22) {
       const d = Math.hypot(dx, dy)
       if (d > R) continue
       let col: number
-      if (d > R - 0.9) col = dy < 0 ? 0xe2b93b : 0x9c7418
-      else if (d > R - 2.8) col = 0x5a3a1e
+      if (d > R - 0.9) {
+        // after a win the rim's lights chase each other around the wheel
+        const bulb = (Math.floor(mod(Math.atan2(dy, dx), TAU) / (TAU / 16)) + party) % 2
+        col = party ? (bulb ? 0xffffff : 0xffd43b) : dy < 0 ? 0xe2b93b : 0x9c7418
+      } else if (d > R - 2.8) col = 0x5a3a1e
       else if (d > hub) {
         const rel = mod(Math.atan2(dy, dx) - wheel, TAU)
         col = POCKET_COLOR[colorOf(WHEEL[mod(Math.round(rel / POCKET), WHEEL.length)])]
@@ -550,15 +680,28 @@ const SPRITES = [
 const SPRITE_COLORS: Record<string, number> = { g: 0x2f9e44, r: 0xe03131, w: 0xffffff, y: 0xffd43b,
                                                 o: 0xe8890c, R: 0xd6001c, c: 0x66d9e8, b: 0x1c7ed6 }
 
-function reelsArt(sl: Casino['sl'], won: boolean) {
+function reelsArt(sl: Casino['sl'], won: boolean, party: number) {
   const W = 28
   const H = 16
   const p = new Pixels(W, H)
   p.rect(0, 0, W, H, 0xc9a227)
+  // the frame's bulbs chase around while it spins and blink in colors after a win
+  if (sl.spinning || party) {
+    const phase = sl.spinning ? sl.frame : party
+    const bulb = sl.spinning ? 0xfff3bf : CHEER[party % CHEER.length]
+    for (let x = 0; x < W; x++) {
+      if ((x + phase) % 3 === 0) p.set(x, 0, bulb)
+      if ((x - phase) % 3 === 0) p.set(x, H - 1, bulb)
+    }
+    for (let y = 0; y < H; y++) {
+      if ((y - phase) % 3 === 0) p.set(0, y, bulb)
+      if ((y + phase) % 3 === 0) p.set(W - 1, y, bulb)
+    }
+  }
   sl.strips.forEach((strip, i) => {
     const x0 = 1 + i * 9
     p.rect(x0, 1, 8, 14, 0xf8f1e3)
-    const t = sl.spinning ? Math.min(1, sl.frame / STOPS[i]) : 1
+    const t = sl.spinning ? Math.min(1, sl.frame / sl.stops[i]) : 1
     const pos = Math.round((strip.length - 1) * PITCH * (1 - (1 - t) ** 3))
     // window row wy shows strip row pos + wy - 3; symbol k sits at k*PITCH+1
     for (let k = -2; k < 3; k++) {
@@ -568,7 +711,9 @@ function reelsArt(sl: Casino['sl'], won: boolean) {
       p.sprite(x0, top, SPRITES[sym], SPRITE_COLORS, 1, 14)
     }
   })
-  const mark = won ? 0x40c057 : 0xe03131
+  // the pay line's marks: green on a win, blinking while the last reel decides
+  const waiting = sl.spinning && sl.tension && sl.frame >= sl.stops[1]
+  const mark = won ? 0x40c057 : waiting && sl.frame % 4 < 2 ? 0xffd43b : 0xe03131
   for (const y of [8, 9]) {
     p.set(0, y, mark)
     p.set(W - 1, y, mark)
@@ -579,38 +724,57 @@ function reelsArt(sl: Casino['sl'], won: boolean) {
 const FELT = 0x0f5132
 const FELT_TEXT = 0xd8f5e3
 
-function cardArt(scr: Screen, x: number, y: number, card: Card | null) {
-  if (card === null) {
-    for (let j = 0; j < 3; j++) scr.text(x, y + j, '▒'.repeat(5), 0x748ffc, 0x1c3d8f)
+/** A card 5 columns wide, or the look it has this frame while it turns over. */
+function cardArt(scr: Screen, x: number, y: number, card: Card | null, flip?: Flip) {
+  let look = card === null ? 'b5' : flip ? flip.seq[flip.f] : 'f5'
+  if (look[0] === 'o') {
+    card = flip?.old ?? card
+    look = `f${look[1]}`
+  }
+  if (look === 'e') {
+    for (let j = 0; j < 3; j++) scr.put(x + 2, y + j, ' ', null, 0xdee2e6)
+    return
+  }
+  const cw = Number(look[1])
+  const left = x + (5 - cw) / 2
+  if (look[0] === 'b' || card === null) {
+    for (let j = 0; j < 3; j++) scr.text(left, y + j, '▒'.repeat(cw), 0x748ffc, 0x1c3d8f)
     return
   }
   const [rank, suit] = card
   const ink = suit === 1 || suit === 2 ? 0xc92a2a : 0x111111
-  for (let j = 0; j < 3; j++) scr.text(x, y + j, ' '.repeat(5), ink, 0xf8f9fa)
+  const paper = look[0] === 's' ? 0xfff3bf : 0xf8f9fa
+  for (let j = 0; j < 3; j++) scr.text(left, y + j, ' '.repeat(cw), ink, paper)
   const label = RANKS[rank]
-  scr.text(x, y, label, ink)
-  scr.put(x + 2, y + 1, SUITS[suit], ink)
-  scr.text(x + 5 - label.length, y + 2, label, ink)
+  scr.text(left, y, label, ink)
+  scr.put(left + (cw - 1) / 2, y + 1, SUITS[suit], ink)
+  scr.text(left + cw - label.length, y + 2, label, ink)
 }
 
-function tableArt(scr: Screen, bj: Casino['bj'], x0: number, y0: number, width: number) {
+function tableArt(scr: Screen, game: Casino, x0: number, y0: number, width: number) {
+  const bj = game.bj
   for (let j = 0; j < 9; j++) scr.text(x0, y0 + j, ' '.repeat(width), null, FELT)
+  // a card still turning over counts once it lands
+  const count = (hand: Card[], id: string) => {
+    const seen = hand.filter((_, i) => !game.flips[id + i])
+    return seen.length ? String(total(seen)) : ''
+  }
   const dealer = bj.dealer
-  const shown = bj.hide ? dealer.slice(0, 1) : dealer
-  const dealerTotal = dealer.length ? (bj.hide ? `${total(shown)} + ?` : String(total(dealer))) : ''
+  const first = count(dealer.slice(0, 1), 'd')
+  const dealerTotal = bj.hide ? (first ? `${first} + ?` : '') : count(dealer, 'd')
   scr.text(x0 + 1, y0, `BANCA ${dealerTotal}`, FELT_TEXT)
-  scr.text(x0 + 1, y0 + 8, `VOCÊ ${bj.player.length ? total(bj.player) : ''}`, FELT_TEXT)
+  scr.text(x0 + 1, y0 + 8, `VOCÊ ${count(bj.player, 'p')}`, FELT_TEXT)
   if (!dealer.length) scr.text(x0 + 1, y0 + 3, 'Aposte e distribua', FELT_TEXT)
 
-  const seat = (hand: (Card | null)[], y: number) => {
+  const seat = (hand: (Card | null)[], y: number, id: string) => {
     const step = hand.length > 1 ? Math.min(6, Math.floor((width - 7) / (hand.length - 1))) : 6
-    hand.forEach((card, i) => cardArt(scr, x0 + 1 + i * step, y, card))
+    hand.forEach((card, i) => cardArt(scr, x0 + 1 + i * step, y, card, game.flips[id + i]))
   }
-  seat(bj.hide ? [dealer[0], null] : dealer, y0 + 1)
-  seat(bj.player, y0 + 5)
+  seat(bj.hide ? [dealer[0], null] : dealer, y0 + 1, 'd')
+  seat(bj.player, y0 + 5, 'p')
   if (bj.stake) {
     const chip = `● ${money(bj.stake)}`
-    scr.text(x0 + width - 1 - chip.length, y0 + 4, chip, 0xffd43b)
+    scr.text(x0 + width - 1 - chip.length, y0 + 4, chip, glow(game, 0xffd43b))
   }
 }
 
@@ -621,16 +785,16 @@ function pokerArt(scr: Screen, game: Casino, x0: number, y0: number, width: numb
   HANDS.forEach((name, i) => {
     const left = i < 4
     const line = name.padEnd(left ? 11 : 10) + String(HAND_PAYS[i]).padStart(left ? 4 : 3)
-    scr.text(x0 + (left ? 1 : 18), y0 + (left ? i : i - 4), line, i === pk.rank ? GOLD : FELT_TEXT)
+    scr.text(x0 + (left ? 1 : 18), y0 + (left ? i : i - 4), line, i === pk.rank ? glow(game, GOLD) : FELT_TEXT)
   })
   const cx = x0 + Math.floor((width - 29) / 2)
   for (let i = 0; i < 5; i++) {
     const x = cx + i * 6
-    cardArt(scr, x, y0 + 6, pk.hand[i] ?? null)
-    if (pk.phase !== 'draw') continue
+    cardArt(scr, x, y0 + 6, pk.hand[i] ?? null, game.flips[`k${i}`])
+    if (pk.phase !== 'draw' && pk.phase !== 'reveal') continue
     if (pk.held[i]) scr.text(x, y0 + 9, ' FICA', 0x111111, GOLD)
     // the card and the row under it both hold it
-    for (let j = 6; j < 10; j++) scr.hits.push([x, x + 5, y0 + j, () => game.hold(i)])
+    if (pk.phase === 'draw') for (let j = 6; j < 10; j++) scr.hits.push([x, x + 5, y0 + j, () => game.hold(i)])
   }
 }
 
@@ -640,12 +804,15 @@ const TAB_BG = 0x343a40
 const TAB_ON = 0xffd43b
 const BTN_BG = 0x495057
 
+/** A color that blinks through CHEER while a win is cheered, and base otherwise. */
+const glow = (game: Casino, base: number) => (game.party > 0 ? CHEER[Math.floor(game.party / 2) % CHEER.length] : base)
+
 function layout(game: Casino, w: number, h: number) {
   const scr = new Screen(w, h)
   let y = 0
-  scr.center(y, '♠ ♥  C A S S I N O  ♦ ♣', GOLD)
+  scr.center(y, '♠ ♥  C A S S I N O  ♦ ♣', glow(game, GOLD))
   y += 1
-  scr.center(y, `● ${money(game.coins)} fichas`, GOLD)
+  scr.center(y, `● ${money(game.balance())} fichas`, game.shown < game.coins ? 0x51cf66 : GOLD)
   y += 2
 
   const tab = (id: Tab, label: string): Item => {
@@ -659,8 +826,14 @@ function layout(game: Casino, w: number, h: number) {
 
   if (game.tab === 'roleta') {
     const r = game.r
-    const art = wheelArt(r)
-    art.blit(scr, Math.floor((w - art.w) / 2), y)
+    const art = wheelArt(r, game.party)
+    const ax = Math.floor((w - art.w) / 2)
+    art.blit(scr, ax, y)
+    if (r.stake) {
+      // the hub shows the pocket under the ball as it rolls by, then the one it lands in
+      const n = ballNumber(r)
+      scr.text(ax + 9, y + 5, ` ${String(n).padStart(2)} `, glow(game, 0xffffff), POCKET_COLOR[colorOf(n)])
+    }
     y += art.h / 2
     const hist = r.history.slice(0, 7)
     if (hist.length) {
@@ -682,7 +855,7 @@ function layout(game: Casino, w: number, h: number) {
   } else if (game.tab === 'blackjack') {
     const bj = game.bj
     const width = Math.max(24, Math.min(w - 2, 30))
-    tableArt(scr, bj, Math.floor((w - width) / 2), y, width)
+    tableArt(scr, game, Math.floor((w - width) / 2), y, width)
     y += 10
     if (bj.phase === 'bet' || bj.phase === 'done') {
       scr.row(y, [[bj.phase === 'bet' ? 'Distribuir' : 'Nova mão', () => game.deal(), 0x111111, GOLD]])
@@ -703,14 +876,17 @@ function layout(game: Casino, w: number, h: number) {
     pokerArt(scr, game, Math.floor((w - width) / 2), y, width)
     y += 11
     if (pk.phase === 'draw') scr.row(y, [['Trocar', () => game.swap(), 0x111111, GOLD]])
-    else scr.row(y, [[pk.phase === 'bet' ? 'Distribuir' : 'Nova mão', () => game.dealPoker(), 0x111111, GOLD]])
+    else if (pk.phase !== 'reveal') {
+      scr.row(y, [[pk.phase === 'bet' ? 'Distribuir' : 'Nova mão', () => game.dealPoker(), 0x111111, GOLD]])
+    }
     y += 2
-    scr.center(y, pk.phase === 'draw' ? 'clique nas cartas que ficam' : 'video poker · par de J ou mais', DIM)
+    if (pk.phase === 'draw') scr.center(y, 'clique nas cartas que ficam', DIM)
+    else if (pk.phase !== 'reveal') scr.center(y, 'video poker · par de J ou mais', DIM)
     y += 2
   } else {
     const sl = game.sl
     const won = !sl.spinning && sl.stake > 0 && payout(sl.strips.map(s => s[s.length - 1])) > 1
-    const art = reelsArt(sl, won)
+    const art = reelsArt(sl, won, game.party)
     art.blit(scr, Math.floor((w - art.w) / 2), y)
     y += art.h / 2 + 1
     const live = !sl.spinning
@@ -733,7 +909,7 @@ function layout(game: Casino, w: number, h: number) {
               game.allIn ? ['ALL IN', allIn, 0xffffff, 0xa61e4d] : ['All in', allIn, 0x111111, GOLD]])
   y += 2
 
-  const tone = game.tone === 'win' ? 0x51cf66 : game.tone === 'lose' ? 0xff6b6b : 0xdee2e6
+  const tone = game.tone === 'win' ? glow(game, 0x51cf66) : game.tone === 'lose' ? 0xff6b6b : 0xdee2e6
   for (const line of wrap(game.msg, Math.max(10, Math.min(w - 2, 32))).slice(0, 2)) {
     scr.center(y, line, tone)
     y += 1
@@ -744,6 +920,9 @@ function layout(game: Casino, w: number, h: number) {
   if (game.coins < MIN_BET && !game.busy()) items.push([`+${money(START)} fichas`, () => game.refill(), 0x111111, GOLD])
   items.push(['Sair', () => 'quit', 0xffffff, 0x862e2e])
   scr.row(Math.max(y, h - 1), items)
+
+  // a big win's chips fall over everything; the clicks still go through to what is under them
+  for (const p of game.rain) if (p.y >= 0) scr.put(Math.floor(p.x * w), Math.floor(p.y), p.ch, p.c)
   return scr
 }
 

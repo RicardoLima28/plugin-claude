@@ -87,6 +87,14 @@ def natural(hand):
     return len(hand) == 2 and total(hand) == 21
 
 
+# a card turning over plays one look per frame: 'b' its back, 'f' its face, 's' its face
+# in a flash, 'o' the face it had before, each with the columns it takes, and 'e' its edge
+UP = ['b3', 'e', 'f3', 's5']
+DOWN = ['o3', 'e', 'b3']
+FLIP_DT = 0.045
+FLIP_GAP = 3
+
+
 # ---------- Caça-níquel ----------
 
 SYMBOLS = ['cereja', 'limão', 'sino', 'estrela', 'sete', 'diamante']
@@ -94,7 +102,8 @@ WEIGHTS = [30, 25, 18, 12, 8, 4]
 TRIPLE = [5, 15, 25, 50, 100, 250]
 PITCH = 10
 STOPS = [28, 40, 52]
-S_FRAMES, S_DT = 52, 0.045
+TENSION = 30
+S_DT = 0.045
 
 
 def payout(faces):
@@ -147,6 +156,17 @@ def rank_hand(hand):
     return -1
 
 
+# ---------- Efeitos ----------
+
+FX_DT = 0.05
+PARTY = 28
+BIG = 9
+CHEER = [0xffd43b, 0x51cf66, 0xffffff, 0xff922b]
+CHIPS = '●✦◆$'
+CHIP_COLORS = [0xffd43b, 0xfcc419, 0xff922b, 0xfff3bf]
+RAIN_ROWS = 28
+
+
 class Casino:
     def __init__(self):
         self.coins = START
@@ -158,8 +178,14 @@ class Casino:
         self.r = dict(spinning=False, frame=R_FRAMES, wfrom=0.0, wto=0.0, ballto=0.0,
                       result=0, pick=None, stake=0, history=[])
         self.bj = dict(phase='bet', dealer=[], player=[], hide=False, stake=0)
-        self.sl = dict(spinning=False, frame=S_FRAMES, strips=[[4], [4], [4]], stake=0)
+        self.sl = dict(spinning=False, frame=STOPS[2], strips=[[4], [4], [4]], stake=0, stops=STOPS,
+                       tension=False)
         self.pk = dict(phase='bet', hand=[], held=[], deck=[], stake=0, rank=-1)
+        self.flips = {}
+        self.then = None
+        self.party = 0
+        self.rain = []
+        self.shown = START
         self.due = {}
 
     # ----- saldo -----
@@ -177,6 +203,7 @@ class Casino:
             game.tab = data.get('tab', 'roleta')
             game.r['history'] = list(data.get('history', []))[:12]
             game.msg = f'Bem-vindo de volta! Saldo {money(game.coins)}.'
+            game.shown = game.coins
         except (OSError, ValueError, TypeError):
             pass
         return game
@@ -221,7 +248,59 @@ class Casino:
         self.save()
 
     def busy(self):
-        return self.r['spinning'] or self.sl['spinning'] or self.bj['phase'] == 'dealer'
+        return (self.r['spinning'] or self.sl['spinning'] or self.bj['phase'] == 'dealer'
+                or self.pk['phase'] == 'reveal' or self.flipping())
+
+    # ----- efeitos -----
+
+    def turn(self, slots, done=None, old=None):
+        """Turns the cards at these slots over one after another, then runs done; with old, each
+        first turns its old face down. While they turn, the cards take no clicks."""
+        done = done or (lambda: None)
+        if not slots:
+            return done()
+        for i, s in enumerate(slots):
+            seq = (DOWN if old else []) + ['b5'] * (i * FLIP_GAP + (2 if old else 0)) + UP
+            self.flips[s] = dict(f=0, seq=seq, old=old[i] if old else None)
+        self.then = done
+
+    def flipping(self):
+        return bool(self.flips)
+
+    def step_flips(self):
+        for s, flip in list(self.flips.items()):
+            flip['f'] += 1
+            if flip['f'] >= len(flip['seq']):
+                del self.flips[s]
+        if not self.flips and self.then:
+            done, self.then = self.then, None
+            done()
+
+    def cheer(self, mult):
+        """Lights a win up: blinking for any win, chips raining down for a big one."""
+        self.party = PARTY
+        if mult < BIG:
+            return
+        for _ in range(30):
+            self.rain.append(dict(x=rng.random(), y=-rng.random() * 10, v=0.8 + rng.random() * 0.8,
+                                  ch=rng.choice(CHIPS), c=rng.choice(CHIP_COLORS)))
+
+    def effects(self):
+        return self.party > 0 or bool(self.rain) or self.shown != self.coins
+
+    def step_fx(self):
+        if self.party > 0:
+            self.party -= 1
+        for p in self.rain:
+            p['y'] += p['v']
+        self.rain = [p for p in self.rain if p['y'] < RAIN_ROWS]
+        # the balance rolls up to a win, and drops to a bet at once
+        gap = self.coins - self.shown
+        self.shown = self.coins if gap <= 1 else self.shown + math.ceil(gap * 0.3)
+
+    def balance(self):
+        """The balance on show: rolling up after a win, never above what there is."""
+        return min(self.shown, self.coins)
 
     # ----- roleta -----
 
@@ -253,6 +332,7 @@ class Casino:
         head = f'Deu {n} {NAME[c]}!'
         if won:
             self.say(f'{head} Ganhou +{money(won)}', 'win')
+            self.cheer(PAYS[c])
         else:
             self.say(f'{head} Perdeu {money(r["stake"])}', 'lose')
         self.save()
@@ -261,41 +341,49 @@ class Casino:
 
     def deal(self):
         bj = self.bj
-        if bj['phase'] in ('play', 'dealer'):
+        if bj['phase'] in ('play', 'dealer') or self.flipping():
             return
         stake = self.take_bet()
         if not stake:
             return
         bj.update(phase='play', player=[draw_card(), draw_card()],
                   dealer=[draw_card(), draw_card()], hide=True, stake=stake)
-        if natural(bj['player']) or natural(bj['dealer']):
-            self.settle()
-        else:
-            self.say(f'Sua mão: {total(bj["player"])}. Pedir ou parar?')
+        self.say('Distribuindo...')
+
+        def dealt():
+            if natural(bj['player']) or natural(bj['dealer']):
+                self.settle()
+            else:
+                self.say(f'Sua mão: {total(bj["player"])}. Pedir ou parar?')
+        self.turn(['p0', 'd0', 'p1'], dealt)
 
     def hit(self):
         bj = self.bj
-        if bj['phase'] != 'play':
+        if bj['phase'] != 'play' or self.flipping():
             return
         bj['player'].append(draw_card())
-        s = total(bj['player'])
-        if s > 21:
-            self.settle()
-        elif s == 21:
-            self.stand()
-        else:
-            self.say(f'Sua mão: {s}.')
+
+        def landed():
+            s = total(bj['player'])
+            if s > 21:
+                self.settle()
+            elif s == 21:
+                self.stand()
+            else:
+                self.say(f'Sua mão: {s}.')
+        self.turn([f'p{len(bj["player"]) - 1}'], landed)
 
     def stand(self):
         bj = self.bj
-        if bj['phase'] != 'play':
+        if bj['phase'] != 'play' or self.flipping():
             return
         bj.update(phase='dealer', hide=False)
         self.say('A banca revela a carta...')
+        self.turn(['d1'])
 
     def double(self):
         bj = self.bj
-        if bj['phase'] != 'play' or len(bj['player']) != 2:
+        if bj['phase'] != 'play' or len(bj['player']) != 2 or self.flipping():
             return
         if self.coins < bj['stake']:
             self.say('Fichas insuficientes para dobrar.', 'lose')
@@ -303,27 +391,28 @@ class Casino:
         self.coins -= bj['stake']
         bj['stake'] *= 2
         bj['player'].append(draw_card())
-        if total(bj['player']) > 21:
-            self.settle()
-        else:
-            self.stand()
+        self.turn(['p2'], lambda: self.settle() if total(bj['player']) > 21 else self.stand())
 
     def step_dealer(self):
         bj = self.bj
         if total(bj['dealer']) < 17:
             bj['dealer'].append(draw_card())
-            self.say(f'Banca compra: {total(bj["dealer"])}')
+            self.turn([f'd{len(bj["dealer"]) - 1}'], lambda: self.say(f'Banca compra: {total(bj["dealer"])}'))
         else:
             self.settle()
 
     def settle(self):
         bj = self.bj
         me, house, st = total(bj['player']), total(bj['dealer']), bj['stake']
+        if bj['hide']:
+            self.turn(['d1'])
         bj.update(phase='done', hide=False)
 
         def pay(mult, msg, tone):
             self.coins += st * mult
             self.say(msg, tone)
+            if tone == 'win':
+                self.cheer(mult)
             self.save()
 
         if me > 21:
@@ -351,19 +440,24 @@ class Casino:
         if not stake:
             return
         # each strip starts at the symbol on show and ends at the new one;
-        # the later reels have longer strips, so they stop one after another
+        # the later reels have longer strips, so they stop one after another,
+        # and when the first two match the last one keeps everyone waiting
+        ends = rng.choices(range(len(SYMBOLS)), WEIGHTS, k=3)
+        tension = ends[0] == ends[1]
         strips = []
         for i, old in enumerate(sl['strips']):
-            strip = [old[-1]] + [rng.randrange(len(SYMBOLS)) for _ in range(16 + i * 6)]
-            strip.append(rng.choices(range(len(SYMBOLS)), WEIGHTS)[0])
-            strips.append(strip)
-        sl.update(spinning=True, frame=0, strips=strips, stake=stake)
+            n = 16 + i * 6 + (18 if tension and i == 2 else 0)
+            strips.append([old[-1]] + [rng.randrange(len(SYMBOLS)) for _ in range(n)] + [ends[i]])
+        stops = [STOPS[0], STOPS[1], STOPS[2] + (TENSION if tension else 0)]
+        sl.update(spinning=True, frame=0, strips=strips, stake=stake, stops=stops, tension=tension)
         self.say(f'{"ALL IN! " if self.all_in else ""}Girando... {money(stake)}')
 
     def step_slots(self):
         sl = self.sl
         sl['frame'] += 1
-        if sl['frame'] < S_FRAMES:
+        if sl['tension'] and sl['frame'] == sl['stops'][1]:
+            self.say('Dois iguais... segura!')
+        if sl['frame'] < sl['stops'][2]:
             return
         sl['spinning'] = False
         faces = [s[-1] for s in sl['strips']]
@@ -378,37 +472,52 @@ class Casino:
             self.say('Duas cerejas: aposta de volta.', None)
         else:
             self.say(f'Nada dessa vez. Perdeu {money(sl["stake"])}', 'lose')
+        if mult > 1:
+            self.cheer(mult)
         self.save()
 
     # ----- poker -----
 
     def deal_poker(self):
         pk = self.pk
-        if pk['phase'] == 'draw':
+        if pk['phase'] in ('draw', 'reveal') or self.flipping():
             return
         stake = self.take_bet()
         if not stake:
             return
+        old = pk['hand'] or None
         deck = shuffled()
         hand = deck[:5]
-        pk.update(phase='draw', hand=hand, held=[False] * 5, deck=deck[5:], stake=stake,
-                  rank=rank_hand(hand))
-        if pk['rank'] >= 0:
-            self.say(f'Você tem {HANDS[pk["rank"]]}. Escolha as que ficam.')
-        else:
-            self.say('Escolha as cartas que ficam e troque.')
+        pk.update(phase='draw', hand=hand, held=[False] * 5, deck=deck[5:], stake=stake, rank=-1)
+        self.say('Distribuindo...')
+
+        def dealt():
+            pk['rank'] = rank_hand(hand)
+            if pk['rank'] >= 0:
+                self.say(f'Você tem {HANDS[pk["rank"]]}. Escolha as que ficam.')
+            else:
+                self.say('Escolha as cartas que ficam e troque.')
+        self.turn([f'k{i}' for i in range(5)], dealt, old)
 
     def hold(self, i):
         pk = self.pk
-        if pk['phase'] == 'draw':
+        if pk['phase'] == 'draw' and not self.flipping():
             pk['held'][i] = not pk['held'][i]
 
     def swap(self):
-        """Swaps the cards not held, once, and pays the hand by the table."""
+        """Turns the cards not held face down and up again as new ones, then pays the hand."""
         pk = self.pk
-        if pk['phase'] != 'draw':
+        if pk['phase'] != 'draw' or self.flipping():
             return
-        pk['hand'] = [card if held else pk['deck'].pop() for card, held in zip(pk['hand'], pk['held'])]
+        old = pk['hand']
+        out = [i for i in range(5) if not pk['held'][i]]
+        pk['hand'] = [card if held else pk['deck'].pop() for card, held in zip(old, pk['held'])]
+        pk['phase'] = 'reveal'
+        self.say('Virando...')
+        self.turn([f'k{i}' for i in out], self.pay_poker, [old[i] for i in out])
+
+    def pay_poker(self):
+        pk = self.pk
         rank = pk['rank'] = rank_hand(pk['hand'])
         pk['phase'] = 'done'
         won = pk['stake'] * HAND_PAYS[rank] if rank >= 0 else 0
@@ -419,6 +528,8 @@ class Casino:
             self.say(f'{HANDS[rank]}: aposta de volta.', None)
         else:
             self.say(f'{"ROYAL FLUSH" if rank == 0 else HANDS[rank]}! +{money(won)}', 'win')
+        if won > pk['stake']:
+            self.cheer(HAND_PAYS[rank])
         self.save()
 
     # ----- relógio -----
@@ -428,7 +539,10 @@ class Casino:
         for key, running, dt, step in (
             ('r', self.r['spinning'], R_DT, self.step_roulette),
             ('s', self.sl['spinning'], S_DT, self.step_slots),
-            ('d', self.bj['phase'] == 'dealer', DEALER_DT, self.step_dealer),
+            ('f', self.flipping(), FLIP_DT, self.step_flips),
+            # the dealer waits for each card to land before the next
+            ('d', self.bj['phase'] == 'dealer' and not self.flipping(), DEALER_DT, self.step_dealer),
+            ('x', self.effects(), FX_DT, self.step_fx),
         ):
             if not running:
                 self.due.pop(key, None)
@@ -445,10 +559,15 @@ class Casino:
             self.step_roulette()
         while self.sl['spinning']:
             self.step_slots()
-        while self.bj['phase'] == 'dealer':
-            self.step_dealer()
-        if self.pk['phase'] == 'draw':
-            self.swap()
+        while True:
+            while self.flipping():
+                self.step_flips()
+            if self.bj['phase'] == 'dealer':
+                self.step_dealer()
+            elif self.pk['phase'] == 'draw':
+                self.swap()
+            else:
+                break
 
 
 # ---------- Tela ----------
@@ -531,12 +650,22 @@ class Pixels:
 POCKET_COLOR = {'red': 0xd42a2a, 'black': 0x1c1c1c, 'green': 0x16a34a}
 
 
-def wheel_art(r, size=22):
-    p = Pixels(size, size)
+def wheel_angles(r):
     t = min(1, r['frame'] / R_FRAMES)
     e = 1 - (1 - t) ** 3
     wheel = r['wfrom'] + (r['wto'] - r['wfrom']) * e
-    ball = r['ballto'] + (1 - e) * TAU * 3
+    return t, wheel, r['ballto'] + (1 - e) * TAU * 3
+
+
+def ball_number(r):
+    """The number in the pocket under the ball: it rolls by while the wheel spins and stops on the result."""
+    _, wheel, ball = wheel_angles(r)
+    return WHEEL[round(((ball - wheel) % TAU) / POCKET) % len(WHEEL)]
+
+
+def wheel_art(r, party, size=22):
+    p = Pixels(size, size)
+    t, wheel, ball = wheel_angles(r)
     drop = 0 if t < 0.7 else (t - 0.7) / 0.3
     c = R = size / 2
     hub = R * 0.36
@@ -547,7 +676,12 @@ def wheel_art(r, size=22):
             if d > R:
                 continue
             if d > R - 0.9:
-                col = 0xe2b93b if dy < 0 else 0x9c7418
+                # after a win the rim's lights chase each other around the wheel
+                bulb = (int((math.atan2(dy, dx) % TAU) / (TAU / 16)) + party) % 2
+                if party:
+                    col = 0xffffff if bulb else 0xffd43b
+                else:
+                    col = 0xe2b93b if dy < 0 else 0x9c7418
             elif d > R - 2.8:
                 col = 0x5a3a1e
             elif d > hub:
@@ -582,14 +716,28 @@ SPRITE_COLORS = {'g': 0x2f9e44, 'r': 0xe03131, 'w': 0xffffff, 'y': 0xffd43b,
                  'o': 0xe8890c, 'R': 0xd6001c, 'c': 0x66d9e8, 'b': 0x1c7ed6}
 
 
-def reels_art(sl, won):
+def reels_art(sl, won, party):
     W, H = 28, 16
     p = Pixels(W, H)
     p.rect(0, 0, W, H, 0xc9a227)
+    # the frame's bulbs chase around while it spins and blink in colors after a win
+    if sl['spinning'] or party:
+        phase = sl['frame'] if sl['spinning'] else party
+        bulb = 0xfff3bf if sl['spinning'] else CHEER[party % len(CHEER)]
+        for x in range(W):
+            if (x + phase) % 3 == 0:
+                p.set(x, 0, bulb)
+            if (x - phase) % 3 == 0:
+                p.set(x, H - 1, bulb)
+        for y in range(H):
+            if (y - phase) % 3 == 0:
+                p.set(0, y, bulb)
+            if (y + phase) % 3 == 0:
+                p.set(W - 1, y, bulb)
     for i, strip in enumerate(sl['strips']):
         x0 = 1 + i * 9
         p.rect(x0, 1, 8, 14, 0xf8f1e3)
-        stop = STOPS[i]
+        stop = sl['stops'][i]
         t = min(1, sl['frame'] / stop) if sl['spinning'] else 1
         pos = round((len(strip) - 1) * PITCH * (1 - (1 - t) ** 3))
         # window row wy shows strip row pos + wy - 3; symbol k sits at k*PITCH+1
@@ -598,7 +746,9 @@ def reels_art(sl, won):
             sym = strip[base % len(strip)]
             top = base * PITCH + 1 - pos + 4
             p.sprite(x0, top, SPRITES[sym], SPRITE_COLORS, 1, 14)
-    mark = 0x40c057 if won else 0xe03131
+    # the pay line's marks: green on a win, blinking while the last reel decides
+    waiting = sl['spinning'] and sl['tension'] and sl['frame'] >= sl['stops'][1]
+    mark = 0x40c057 if won else 0xffd43b if waiting and sl['frame'] % 4 < 2 else 0xe03131
     for y in (8, 9):
         p.set(0, y, mark)
         p.set(W - 1, y, mark)
@@ -608,42 +758,61 @@ def reels_art(sl, won):
 FELT, FELT_TEXT = 0x0f5132, 0xd8f5e3
 
 
-def card_art(scr, x, y, card):
-    if card is None:
+def card_art(scr, x, y, card, flip=None):
+    """A card 5 columns wide, or the look it has this frame while it turns over."""
+    look = 'b5' if card is None else flip['seq'][flip['f']] if flip else 'f5'
+    if look[0] == 'o':
+        card = flip['old'] or card
+        look = 'f' + look[1]
+    if look == 'e':
         for j in range(3):
-            scr.text(x, y + j, '▒' * 5, 0x748ffc, 0x1c3d8f)
+            scr.put(x + 2, y + j, ' ', None, 0xdee2e6)
+        return
+    cw = int(look[1])
+    left = x + (5 - cw) // 2
+    if look[0] == 'b' or card is None:
+        for j in range(3):
+            scr.text(left, y + j, '▒' * cw, 0x748ffc, 0x1c3d8f)
         return
     rank, suit = card
     ink = 0xc92a2a if suit in (1, 2) else 0x111111
+    paper = 0xfff3bf if look[0] == 's' else 0xf8f9fa
     for j in range(3):
-        scr.text(x, y + j, ' ' * 5, ink, 0xf8f9fa)
+        scr.text(left, y + j, ' ' * cw, ink, paper)
     label = RANKS[rank]
-    scr.text(x, y, label, ink)
-    scr.put(x + 2, y + 1, SUITS[suit], ink)
-    scr.text(x + 5 - len(label), y + 2, label, ink)
+    scr.text(left, y, label, ink)
+    scr.put(left + (cw - 1) // 2, y + 1, SUITS[suit], ink)
+    scr.text(left + cw - len(label), y + 2, label, ink)
 
 
-def table_art(scr, bj, x0, y0, width):
+def table_art(scr, game, x0, y0, width):
+    bj = game.bj
     for j in range(9):
         scr.text(x0, y0 + j, ' ' * width, None, FELT)
+
+    # a card still turning over counts once it lands
+    def count(hand, id):
+        seen = [card for i, card in enumerate(hand) if f'{id}{i}' not in game.flips]
+        return str(total(seen)) if seen else ''
+
     dealer = bj['dealer']
-    shown = dealer[:1] if bj['hide'] else dealer
-    dealer_total = (f'{total(shown)} + ?' if bj['hide'] else str(total(dealer))) if dealer else ''
+    first = count(dealer[:1], 'd')
+    dealer_total = (f'{first} + ?' if first else '') if bj['hide'] else count(dealer, 'd')
     scr.text(x0 + 1, y0, f'BANCA {dealer_total}', FELT_TEXT)
-    scr.text(x0 + 1, y0 + 8, f'VOCÊ {total(bj["player"]) if bj["player"] else ""}', FELT_TEXT)
+    scr.text(x0 + 1, y0 + 8, f'VOCÊ {count(bj["player"], "p")}', FELT_TEXT)
     if not dealer:
         scr.text(x0 + 1, y0 + 3, 'Aposte e distribua', FELT_TEXT)
 
-    def seat(hand, y):
+    def seat(hand, y, id):
         step = min(6, (width - 7) // (len(hand) - 1)) if len(hand) > 1 else 6
         for i, card in enumerate(hand):
-            card_art(scr, x0 + 1 + i * step, y, card)
+            card_art(scr, x0 + 1 + i * step, y, card, game.flips.get(f'{id}{i}'))
 
-    seat([dealer[0], None] if bj['hide'] else dealer, y0 + 1)
-    seat(bj['player'], y0 + 5)
+    seat([dealer[0], None] if bj['hide'] else dealer, y0 + 1, 'd')
+    seat(bj['player'], y0 + 5, 'p')
     if bj['stake']:
         chip = f'● {money(bj["stake"])}'
-        scr.text(x0 + width - 1 - len(chip), y0 + 4, chip, 0xffd43b)
+        scr.text(x0 + width - 1 - len(chip), y0 + 4, chip, glow(game, 0xffd43b))
 
 
 def poker_art(scr, game, x0, y0, width):
@@ -655,18 +824,19 @@ def poker_art(scr, game, x0, y0, width):
         left = i < 4
         line = name.ljust(11 if left else 10) + str(HAND_PAYS[i]).rjust(4 if left else 3)
         scr.text(x0 + (1 if left else 18), y0 + (i if left else i - 4), line,
-                 GOLD if i == pk['rank'] else FELT_TEXT)
+                 glow(game, GOLD) if i == pk['rank'] else FELT_TEXT)
     cx = x0 + (width - 29) // 2
     for i in range(5):
         x = cx + i * 6
-        card_art(scr, x, y0 + 6, pk['hand'][i] if pk['hand'] else None)
-        if pk['phase'] != 'draw':
+        card_art(scr, x, y0 + 6, pk['hand'][i] if pk['hand'] else None, game.flips.get(f'k{i}'))
+        if pk['phase'] not in ('draw', 'reveal'):
             continue
         if pk['held'][i]:
             scr.text(x, y0 + 9, ' FICA', 0x111111, GOLD)
         # the card and the row under it both hold it
-        for j in range(6, 10):
-            scr.hits.append((x, x + 5, y0 + j, lambda i=i: game.hold(i)))
+        if pk['phase'] == 'draw':
+            for j in range(6, 10):
+                scr.hits.append((x, x + 5, y0 + j, lambda i=i: game.hold(i)))
 
 
 GOLD = 0xffd43b
@@ -675,12 +845,17 @@ TAB_BG, TAB_ON = 0x343a40, 0xffd43b
 BTN_BG = 0x495057
 
 
+def glow(game, base):
+    """A color that blinks through CHEER while a win is cheered, and base otherwise."""
+    return CHEER[game.party // 2 % len(CHEER)] if game.party > 0 else base
+
+
 def layout(game, w, h):
     scr = Screen(w, h)
     y = 0
-    scr.center(y, '♠ ♥  C A S S I N O  ♦ ♣', GOLD)
+    scr.center(y, '♠ ♥  C A S S I N O  ♦ ♣', glow(game, GOLD))
     y += 1
-    scr.center(y, f'● {money(game.coins)} fichas', GOLD)
+    scr.center(y, f'● {money(game.balance())} fichas', 0x51cf66 if game.shown < game.coins else GOLD)
     y += 2
 
     def tab(id, label):
@@ -698,8 +873,13 @@ def layout(game, w, h):
 
     if game.tab == 'roleta':
         r = game.r
-        art = wheel_art(r)
-        art.blit(scr, (w - art.w) // 2, y)
+        art = wheel_art(r, game.party)
+        ax = (w - art.w) // 2
+        art.blit(scr, ax, y)
+        if r['stake']:
+            # the hub shows the pocket under the ball as it rolls by, then the one it lands in
+            n = ball_number(r)
+            scr.text(ax + 9, y + 5, f' {n:>2} ', glow(game, 0xffffff), POCKET_COLOR[color_of(n)])
         y += art.h // 2
         hist = r['history'][:7]
         if hist:
@@ -722,7 +902,7 @@ def layout(game, w, h):
     elif game.tab == 'blackjack':
         bj = game.bj
         width = max(24, min(w - 2, 30))
-        table_art(scr, bj, (w - width) // 2, y, width)
+        table_art(scr, game, (w - width) // 2, y, width)
         y += 10
         if bj['phase'] in ('bet', 'done'):
             label = 'Distribuir' if bj['phase'] == 'bet' else 'Nova mão'
@@ -744,16 +924,19 @@ def layout(game, w, h):
         y += 11
         if pk['phase'] == 'draw':
             scr.row(y, [('Trocar', game.swap, 0x111111, GOLD)])
-        else:
+        elif pk['phase'] != 'reveal':
             label = 'Distribuir' if pk['phase'] == 'bet' else 'Nova mão'
             scr.row(y, [(label, game.deal_poker, 0x111111, GOLD)])
         y += 2
-        scr.center(y, 'clique nas cartas que ficam' if pk['phase'] == 'draw' else 'video poker · par de J ou mais', DIM)
+        if pk['phase'] == 'draw':
+            scr.center(y, 'clique nas cartas que ficam', DIM)
+        elif pk['phase'] != 'reveal':
+            scr.center(y, 'video poker · par de J ou mais', DIM)
         y += 2
     else:
         sl = game.sl
         won = not sl['spinning'] and sl['stake'] and payout([s[-1] for s in sl['strips']]) > 1
-        art = reels_art(sl, won)
+        art = reels_art(sl, won, game.party)
         art.blit(scr, (w - art.w) // 2, y)
         y += art.h // 2 + 1
         live = not sl['spinning']
@@ -780,7 +963,7 @@ def layout(game, w, h):
                 ('ALL IN', all_in, 0xffffff, 0xa61e4d) if game.all_in else ('All in', all_in, 0x111111, GOLD)])
     y += 2
 
-    tone = {'win': 0x51cf66, 'lose': 0xff6b6b}.get(game.tone, 0xdee2e6)
+    tone = {'win': glow(game, 0x51cf66), 'lose': 0xff6b6b}.get(game.tone, 0xdee2e6)
     for line in wrap(game.msg, max(10, min(w - 2, 32)))[:2]:
         scr.center(y, line, tone)
         y += 1
@@ -791,6 +974,11 @@ def layout(game, w, h):
         items.append((f'+{money(START)} fichas', game.refill, 0x111111, GOLD))
     items.append(('Sair', lambda: 'quit', 0xffffff, 0x862e2e))
     scr.row(max(y, h - 1), items)
+
+    # a big win's chips fall over everything; the clicks still go through to what is under them
+    for p in game.rain:
+        if p['y'] >= 0:
+            scr.put(int(p['x'] * w), int(p['y']), p['ch'], p['c'])
     return scr
 
 

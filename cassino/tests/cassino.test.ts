@@ -45,7 +45,8 @@ test('a click on Vermelho spins the wheel and the balance is saved', async ($, o
   expect((await ui.find({ type: 'Text', text: /fichas/, in: 'mesa' }))?.text).toBe('● 950 fichas')
   expect((await ui.find({ type: 'Text', text: /Girando/, in: 'mesa' }))?.text).toContain('VERMELHO')
 
-  await ui.advance(4000)
+  // the spin, the balance rolling up and any chips raining down are over by then
+  await ui.advance(6000)
   expect((await ui.find({ type: 'Text', text: /^Deu /, in: 'mesa' }))).toBeDefined()
   const after = (await ui.find({ type: 'Text', text: /fichas/, in: 'mesa' }))?.text
   expect(after).toMatch(/^● (950|1\.050|2\.750) fichas$/)
@@ -106,12 +107,15 @@ test('blackjack deals and the slots spin to a result', async ($, on) => {
   await ui.pointer({ type: 'down', x: 15, y: 3, button: 'left', in: 'mesa' })
   expect(await shown(/Aposte e distribua/)).toBeDefined()
   await ui.pointer({ type: 'down', x: 13, y: 15, button: 'left', in: 'mesa' })
+  expect(await shown(/Distribuindo/)).toBeDefined()
+  await ui.advance(4000)
   expect(await shown(/Sua mão|BLACKJACK|Blackjack da banca|Empate/)).toBeDefined()
 
   await ui.pointer({ type: 'down', x: 22, y: 3, button: 'left', in: 'mesa' })
   await ui.pointer({ type: 'down', x: 14, y: 14, button: 'left', in: 'mesa' })
   expect(await shown(/Girando/)).toBeDefined()
-  await ui.advance(3000)
+  // up to 3,7 s with the last reel holding out, then the chips of a big win
+  await ui.advance(7000)
   expect(await shown(/Nada dessa vez|Trinca|JACKPOT|Duas cerejas/)).toBeDefined()
   await ui.unmount()
 })
@@ -128,6 +132,10 @@ test('poker deals five cards, holds the clicked ones and pays the swap', async (
   // Distribuir, Trocar and Nova mão all sit on row 16 around x 16
   await click(16, 16)
   expect(await shown(/fichas/)).toBe('● 950 fichas')
+  // the cards take no clicks while they turn over
+  await click(4, 12)
+  await ui.advance(1000)
+  expect(await shown(/FICA/)).toBeUndefined()
   expect(await shown(/Escolha/)).toBeDefined()
 
   // the first card sits at x 2-6 on rows 11-13, its FICA tag on row 14
@@ -136,7 +144,10 @@ test('poker deals five cards, holds the clicked ones and pays the swap', async (
   await click(4, 14)
   expect(await shown(/FICA/)).toBeUndefined()
 
+  // the swapped cards turn over before the hand is paid
   await click(16, 16)
+  expect(await shown(/Virando/)).toBeDefined()
+  await ui.advance(4000)
   expect(await shown(/Nada dessa vez|aposta de volta|! \+\d/)).toBeDefined()
   expect(await shown(/Nova mão/)).toBeDefined()
   await ui.unmount()

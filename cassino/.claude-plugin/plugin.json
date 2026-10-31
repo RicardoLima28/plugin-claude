@@ -1,5 +1,5 @@
 {
   "name": "cassino",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Mini cassino pixelizado num painel ao lado do chat do Claude Code: roleta, blackjack, caça-níquel e video poker com fichas fictícias"
 }
