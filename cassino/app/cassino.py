@@ -106,6 +106,47 @@ def payout(faces):
     return 0
 
 
+# ---------- Video poker (Jacks or Better) ----------
+
+HANDS = ['Royal flush', 'Str. flush', 'Quadra', 'Full house', 'Flush', 'Sequência', 'Trinca',
+         'Dois pares', 'Par de J+']
+HAND_PAYS = [250, 50, 25, 9, 6, 4, 3, 2, 1]
+
+
+def shuffled():
+    deck = [[r, s] for s in range(4) for r in range(1, 14)]
+    rng.shuffle(deck)
+    return deck
+
+
+def rank_hand(hand):
+    """The best hand among HANDS as its index, or -1 for nothing."""
+    counts = {}
+    for r, _ in hand:
+        counts[r] = counts.get(r, 0) + 1
+    groups = sorted(counts.values(), reverse=True)
+    ranks = sorted(counts)
+    flush = len({s for _, s in hand}) == 1
+    straight = len(ranks) == 5 and (ranks[4] - ranks[0] == 4 or ranks == [1, 10, 11, 12, 13])
+    if straight and flush:
+        return 0 if ranks[:2] == [1, 10] else 1
+    if groups[0] == 4:
+        return 2
+    if groups[:2] == [3, 2]:
+        return 3
+    if flush:
+        return 4
+    if straight:
+        return 5
+    if groups[0] == 3:
+        return 6
+    if groups[:2] == [2, 2]:
+        return 7
+    if any(n == 2 and (r == 1 or r >= 11) for r, n in counts.items()):
+        return 8
+    return -1
+
+
 class Casino:
     def __init__(self):
         self.coins = START
@@ -118,6 +159,7 @@ class Casino:
                       result=0, pick=None, stake=0, history=[])
         self.bj = dict(phase='bet', dealer=[], player=[], hide=False, stake=0)
         self.sl = dict(spinning=False, frame=S_FRAMES, strips=[[4], [4], [4]], stake=0)
+        self.pk = dict(phase='bet', hand=[], held=[], deck=[], stake=0, rank=-1)
         self.due = {}
 
     # ----- saldo -----
@@ -338,6 +380,47 @@ class Casino:
             self.say(f'Nada dessa vez. Perdeu {money(sl["stake"])}', 'lose')
         self.save()
 
+    # ----- poker -----
+
+    def deal_poker(self):
+        pk = self.pk
+        if pk['phase'] == 'draw':
+            return
+        stake = self.take_bet()
+        if not stake:
+            return
+        deck = shuffled()
+        hand = deck[:5]
+        pk.update(phase='draw', hand=hand, held=[False] * 5, deck=deck[5:], stake=stake,
+                  rank=rank_hand(hand))
+        if pk['rank'] >= 0:
+            self.say(f'Você tem {HANDS[pk["rank"]]}. Escolha as que ficam.')
+        else:
+            self.say('Escolha as cartas que ficam e troque.')
+
+    def hold(self, i):
+        pk = self.pk
+        if pk['phase'] == 'draw':
+            pk['held'][i] = not pk['held'][i]
+
+    def swap(self):
+        """Swaps the cards not held, once, and pays the hand by the table."""
+        pk = self.pk
+        if pk['phase'] != 'draw':
+            return
+        pk['hand'] = [card if held else pk['deck'].pop() for card, held in zip(pk['hand'], pk['held'])]
+        rank = pk['rank'] = rank_hand(pk['hand'])
+        pk['phase'] = 'done'
+        won = pk['stake'] * HAND_PAYS[rank] if rank >= 0 else 0
+        self.coins += won
+        if rank < 0:
+            self.say(f'Nada dessa vez. Perdeu {money(pk["stake"])}', 'lose')
+        elif won == pk['stake']:
+            self.say(f'{HANDS[rank]}: aposta de volta.', None)
+        else:
+            self.say(f'{"ROYAL FLUSH" if rank == 0 else HANDS[rank]}! +{money(won)}', 'win')
+        self.save()
+
     # ----- relógio -----
 
     def tick(self, now):
@@ -364,6 +447,8 @@ class Casino:
             self.step_slots()
         while self.bj['phase'] == 'dealer':
             self.step_dealer()
+        if self.pk['phase'] == 'draw':
+            self.swap()
 
 
 # ---------- Tela ----------
@@ -561,6 +646,29 @@ def table_art(scr, bj, x0, y0, width):
         scr.text(x0 + width - 1 - len(chip), y0 + 4, chip, 0xffd43b)
 
 
+def poker_art(scr, game, x0, y0, width):
+    pk = game.pk
+    for j in range(10):
+        scr.text(x0, y0 + j, ' ' * width, None, FELT)
+    # the pay table in two columns, the hand on the table lit in gold
+    for i, name in enumerate(HANDS):
+        left = i < 4
+        line = name.ljust(11 if left else 10) + str(HAND_PAYS[i]).rjust(4 if left else 3)
+        scr.text(x0 + (1 if left else 18), y0 + (i if left else i - 4), line,
+                 GOLD if i == pk['rank'] else FELT_TEXT)
+    cx = x0 + (width - 29) // 2
+    for i in range(5):
+        x = cx + i * 6
+        card_art(scr, x, y0 + 6, pk['hand'][i] if pk['hand'] else None)
+        if pk['phase'] != 'draw':
+            continue
+        if pk['held'][i]:
+            scr.text(x, y0 + 9, ' FICA', 0x111111, GOLD)
+        # the card and the row under it both hold it
+        for j in range(6, 10):
+            scr.hits.append((x, x + 5, y0 + j, lambda i=i: game.hold(i)))
+
+
 GOLD = 0xffd43b
 DIM = 0x868e96
 TAB_BG, TAB_ON = 0x343a40, 0xffd43b
@@ -583,7 +691,9 @@ def layout(game, w, h):
             game.save()
         return (label, go, 0x111111 if on else 0xdee2e6, TAB_ON if on else TAB_BG)
 
-    scr.row(y, [tab('roleta', 'Roleta'), tab('blackjack', 'Blackjack'), tab('slots', 'Slots')])
+    # four tabs fit in 34 columns only with no gap between them
+    scr.row(y, [tab('roleta', 'Roleta'), tab('blackjack', 'Blackjack'), tab('slots', 'Slots'),
+                tab('poker', 'Poker')], 0)
     y += 2
 
     if game.tab == 'roleta':
@@ -626,6 +736,19 @@ def layout(game, w, h):
             scr.center(y, 'vez da banca...', GOLD)
         y += 2
         scr.center(y, 'blackjack paga 3:2', DIM)
+        y += 2
+    elif game.tab == 'poker':
+        pk = game.pk
+        width = max(24, min(w - 2, 32))
+        poker_art(scr, game, (w - width) // 2, y, width)
+        y += 11
+        if pk['phase'] == 'draw':
+            scr.row(y, [('Trocar', game.swap, 0x111111, GOLD)])
+        else:
+            label = 'Distribuir' if pk['phase'] == 'bet' else 'Nova mão'
+            scr.row(y, [(label, game.deal_poker, 0x111111, GOLD)])
+        y += 2
+        scr.center(y, 'clique nas cartas que ficam' if pk['phase'] == 'draw' else 'video poker · par de J ou mais', DIM)
         y += 2
     else:
         sl = game.sl

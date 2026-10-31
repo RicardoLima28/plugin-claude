@@ -1,6 +1,6 @@
 # plugin-claude
 
-Marketplace de plugins do Claude Code. Por enquanto tem um plugin, o **cassino**: um mini cassino em pixel art para jogar no terminal com fichas fictícias enquanto o Claude trabalha. Tem roleta, blackjack e caça-níquel, tudo jogado com o mouse.
+Marketplace de plugins do Claude Code. Por enquanto tem um plugin, o **cassino**: um mini cassino em pixel art para jogar no terminal com fichas fictícias enquanto o Claude trabalha. Tem roleta, blackjack, caça-níquel e video poker, tudo jogado com o mouse.
 
 ## Instalar
 

@@ -102,16 +102,42 @@ test('blackjack deals and the slots spin to a result', async ($, on) => {
   await ui.resize({ columns: 34, rows: 28, in: 'mesa' })
   const shown = async (text: RegExp) => (await ui.find({ type: 'Text', text, in: 'mesa' }))?.text
 
-  // tabs on row 3: Roleta x 3-10, Blackjack x 12-22, Slots x 24-30
+  // tabs on row 3: Roleta x 0-7, Blackjack x 8-18, Slots x 19-25, Poker x 26-32
   await ui.pointer({ type: 'down', x: 15, y: 3, button: 'left', in: 'mesa' })
   expect(await shown(/Aposte e distribua/)).toBeDefined()
   await ui.pointer({ type: 'down', x: 13, y: 15, button: 'left', in: 'mesa' })
   expect(await shown(/Sua mão|BLACKJACK|Blackjack da banca|Empate/)).toBeDefined()
 
-  await ui.pointer({ type: 'down', x: 26, y: 3, button: 'left', in: 'mesa' })
+  await ui.pointer({ type: 'down', x: 22, y: 3, button: 'left', in: 'mesa' })
   await ui.pointer({ type: 'down', x: 14, y: 14, button: 'left', in: 'mesa' })
   expect(await shown(/Girando/)).toBeDefined()
   await ui.advance(3000)
   expect(await shown(/Nada dessa vez|Trinca|JACKPOT|Duas cerejas/)).toBeDefined()
+  await ui.unmount()
+})
+
+test('poker deals five cards, holds the clicked ones and pays the swap', async ($, on) => {
+  mock.store(on, { save: { coins: 1000, bet: 50, tab: 'roleta', history: [] } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.resize({ columns: 34, rows: 28, in: 'mesa' })
+  const shown = async (text: RegExp) => (await ui.find({ type: 'Text', text, in: 'mesa' }))?.text
+  const click = (x: number, y: number) => ui.pointer({ type: 'down', x, y, button: 'left', in: 'mesa' })
+
+  await click(28, 3)
+  expect(await shown(/Par de J\+/)).toBeDefined()
+  // Distribuir, Trocar and Nova mão all sit on row 16 around x 16
+  await click(16, 16)
+  expect(await shown(/fichas/)).toBe('● 950 fichas')
+  expect(await shown(/Escolha/)).toBeDefined()
+
+  // the first card sits at x 2-6 on rows 11-13, its FICA tag on row 14
+  await click(4, 12)
+  expect(await shown(/FICA/)).toBeDefined()
+  await click(4, 14)
+  expect(await shown(/FICA/)).toBeUndefined()
+
+  await click(16, 16)
+  expect(await shown(/Nada dessa vez|aposta de volta|! \+\d/)).toBeDefined()
+  expect(await shown(/Nova mão/)).toBeDefined()
   await ui.unmount()
 })

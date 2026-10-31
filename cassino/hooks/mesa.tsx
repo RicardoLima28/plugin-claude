@@ -9,7 +9,7 @@ const START = 1000
 const ROWS = 28
 const TICK = 15
 
-type Tab = 'roleta' | 'blackjack' | 'slots'
+type Tab = 'roleta' | 'blackjack' | 'slots' | 'poker'
 type Pick = 'red' | 'black' | 'green'
 type Card = [number, number]
 export type Save = { coins: number; bet: number; allIn: boolean; tab: Tab; history: number[] }
@@ -92,6 +92,41 @@ function payout([a, b, c]: number[]) {
   return 0
 }
 
+// ---------- Video poker (Jacks or Better) ----------
+
+const HANDS = ['Royal flush', 'Str. flush', 'Quadra', 'Full house', 'Flush', 'Sequência', 'Trinca',
+               'Dois pares', 'Par de J+']
+const HAND_PAYS = [250, 50, 25, 9, 6, 4, 3, 2, 1]
+
+function shuffled() {
+  const deck: Card[] = []
+  for (let s = 0; s < 4; s++) for (let r = 1; r <= 13; r++) deck.push([r, s])
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = randrange(i + 1)
+    ;[deck[i], deck[j]] = [deck[j], deck[i]]
+  }
+  return deck
+}
+
+/** The best hand among HANDS as its index, or -1 for nothing. */
+function rankHand(hand: Card[]) {
+  const counts = new Map<number, number>()
+  for (const [r] of hand) counts.set(r, (counts.get(r) ?? 0) + 1)
+  const groups = [...counts.values()].sort((a, b) => b - a)
+  const ranks = [...counts.keys()].sort((a, b) => a - b)
+  const flush = hand.every(([, s]) => s === hand[0][1])
+  const straight = ranks.length === 5 && (ranks[4] - ranks[0] === 4 || ranks.join() === '1,10,11,12,13')
+  if (straight && flush) return ranks[0] === 1 && ranks[1] === 10 ? 0 : 1
+  if (groups[0] === 4) return 2
+  if (groups[0] === 3 && groups[1] === 2) return 3
+  if (flush) return 4
+  if (straight) return 5
+  if (groups[0] === 3) return 6
+  if (groups[0] === 2 && groups[1] === 2) return 7
+  if ([...counts].some(([r, n]) => n === 2 && (r === 1 || r >= 11))) return 8
+  return -1
+}
+
 class Casino {
   coins = START
   bet = 50
@@ -104,6 +139,8 @@ class Casino {
   bj = { phase: 'bet' as 'bet' | 'play' | 'dealer' | 'done', dealer: [] as Card[],
          player: [] as Card[], hide: false, stake: 0 }
   sl = { spinning: false, frame: S_FRAMES, strips: [[4], [4], [4]], stake: 0 }
+  pk = { phase: 'bet' as 'bet' | 'draw' | 'done', hand: [] as Card[], held: [] as boolean[],
+         deck: [] as Card[], stake: 0, rank: -1 }
   due: Record<string, number> = {}
 
   constructor(public onSave: (save: Save) => void, saved?: Partial<Save>) {
@@ -306,6 +343,40 @@ class Casino {
     this.save()
   }
 
+  // ----- poker -----
+
+  dealPoker() {
+    const pk = this.pk
+    if (pk.phase === 'draw') return
+    const stake = this.takeBet()
+    if (!stake) return
+    const deck = shuffled()
+    const hand = deck.splice(0, 5)
+    Object.assign(pk, { phase: 'draw', hand, held: hand.map(() => false), deck, stake, rank: rankHand(hand) })
+    this.say(pk.rank >= 0 ? `Você tem ${HANDS[pk.rank]}. Escolha as que ficam.`
+                          : 'Escolha as cartas que ficam e troque.')
+  }
+
+  hold(i: number) {
+    const pk = this.pk
+    if (pk.phase === 'draw') pk.held[i] = !pk.held[i]
+  }
+
+  /** Swaps the cards not held, once, and pays the hand by the table. */
+  swap() {
+    const pk = this.pk
+    if (pk.phase !== 'draw') return
+    pk.hand = pk.hand.map((card, i) => (pk.held[i] ? card : pk.deck.pop()!))
+    pk.rank = rankHand(pk.hand)
+    pk.phase = 'done'
+    const won = pk.rank >= 0 ? pk.stake * HAND_PAYS[pk.rank] : 0
+    this.coins += won
+    if (pk.rank < 0) this.say(`Nada dessa vez. Perdeu ${money(pk.stake)}`, 'lose')
+    else if (won === pk.stake) this.say(`${HANDS[pk.rank]}: aposta de volta.`, null)
+    else this.say(`${pk.rank === 0 ? 'ROYAL FLUSH' : HANDS[pk.rank]}! +${money(won)}`, 'win')
+    this.save()
+  }
+
   // ----- relógio -----
 
   tick(now: number) {
@@ -334,6 +405,7 @@ class Casino {
     while (this.r.spinning) this.stepRoulette()
     while (this.sl.spinning) this.stepSlots()
     while (this.bj.phase === 'dealer') this.stepDealer()
+    if (this.pk.phase === 'draw') this.swap()
   }
 }
 
@@ -542,6 +614,26 @@ function tableArt(scr: Screen, bj: Casino['bj'], x0: number, y0: number, width: 
   }
 }
 
+function pokerArt(scr: Screen, game: Casino, x0: number, y0: number, width: number) {
+  const pk = game.pk
+  for (let j = 0; j < 10; j++) scr.text(x0, y0 + j, ' '.repeat(width), null, FELT)
+  // the pay table in two columns, the hand on the table lit in gold
+  HANDS.forEach((name, i) => {
+    const left = i < 4
+    const line = name.padEnd(left ? 11 : 10) + String(HAND_PAYS[i]).padStart(left ? 4 : 3)
+    scr.text(x0 + (left ? 1 : 18), y0 + (left ? i : i - 4), line, i === pk.rank ? GOLD : FELT_TEXT)
+  })
+  const cx = x0 + Math.floor((width - 29) / 2)
+  for (let i = 0; i < 5; i++) {
+    const x = cx + i * 6
+    cardArt(scr, x, y0 + 6, pk.hand[i] ?? null)
+    if (pk.phase !== 'draw') continue
+    if (pk.held[i]) scr.text(x, y0 + 9, ' FICA', 0x111111, GOLD)
+    // the card and the row under it both hold it
+    for (let j = 6; j < 10; j++) scr.hits.push([x, x + 5, y0 + j, () => game.hold(i)])
+  }
+}
+
 const GOLD = 0xffd43b
 const DIM = 0x868e96
 const TAB_BG = 0x343a40
@@ -560,7 +652,9 @@ function layout(game: Casino, w: number, h: number) {
     const on = game.tab === id
     return [label, () => { game.tab = id; game.save() }, on ? 0x111111 : 0xdee2e6, on ? TAB_ON : TAB_BG]
   }
-  scr.row(y, [tab('roleta', 'Roleta'), tab('blackjack', 'Blackjack'), tab('slots', 'Slots')])
+  // four tabs fit in 34 columns only with no gap between them
+  scr.row(y, [tab('roleta', 'Roleta'), tab('blackjack', 'Blackjack'), tab('slots', 'Slots'),
+              tab('poker', 'Poker')], 0)
   y += 2
 
   if (game.tab === 'roleta') {
@@ -602,6 +696,16 @@ function layout(game: Casino, w: number, h: number) {
     }
     y += 2
     scr.center(y, 'blackjack paga 3:2', DIM)
+    y += 2
+  } else if (game.tab === 'poker') {
+    const pk = game.pk
+    const width = Math.max(24, Math.min(w - 2, 32))
+    pokerArt(scr, game, Math.floor((w - width) / 2), y, width)
+    y += 11
+    if (pk.phase === 'draw') scr.row(y, [['Trocar', () => game.swap(), 0x111111, GOLD]])
+    else scr.row(y, [[pk.phase === 'bet' ? 'Distribuir' : 'Nova mão', () => game.dealPoker(), 0x111111, GOLD]])
+    y += 2
+    scr.center(y, pk.phase === 'draw' ? 'clique nas cartas que ficam' : 'video poker · par de J ou mais', DIM)
     y += 2
   } else {
     const sl = game.sl
