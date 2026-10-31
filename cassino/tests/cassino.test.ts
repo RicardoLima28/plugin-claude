@@ -120,7 +120,7 @@ test('blackjack deals and the slots spin to a result', async ($, on) => {
   await ui.unmount()
 })
 
-test('poker deals five cards, holds the clicked ones and pays the swap', async ($, on) => {
+test('poker deals five, keeps two of them and pays them with the table', async ($, on) => {
   mock.store(on, { save: { coins: 1000, bet: 50, tab: 'roleta', history: [] } })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.resize({ columns: 34, rows: 28, in: 'mesa' })
@@ -128,26 +128,33 @@ test('poker deals five cards, holds the clicked ones and pays the swap', async (
   const click = (x: number, y: number) => ui.pointer({ type: 'down', x, y, button: 'left', in: 'mesa' })
 
   await click(28, 3)
-  expect(await shown(/Par de J\+/)).toBeDefined()
-  // Distribuir, Trocar and Nova mão all sit on row 16 around x 16
-  await click(16, 16)
+  expect(await shown(/Dois pares/)).toBeDefined()
+  // Distribuir, Ver a mesa and Nova mão all sit on row 19 around x 16
+  await click(16, 19)
   expect(await shown(/fichas/)).toBe('● 950 fichas')
   // the cards take no clicks while they turn over
   await click(4, 12)
   await ui.advance(1000)
   expect(await shown(/FICA/)).toBeUndefined()
-  expect(await shown(/Escolha/)).toBeDefined()
+  expect(await shown(/Escolha 2/)).toBeDefined()
 
-  // the first card sits at x 2-6 on rows 11-13, its FICA tag on row 14
+  // the dealt cards sit at x 2-6, 8-12, 14-18... on rows 11-13, their FICA tags on row 14,
+  // and the two kept ones again at x 11-15 and 17-21 on rows 15-17
   await click(4, 12)
   expect(await shown(/FICA/)).toBeDefined()
-  await click(4, 14)
+  expect(await shown(/Escolha mais uma/)).toBeDefined()
+  await click(13, 16)
   expect(await shown(/FICA/)).toBeUndefined()
+  await click(4, 12)
+  await click(10, 14)
+  await click(16, 12)
+  expect(await shown(/Só duas/)).toBeDefined()
 
-  // the swapped cards turn over before the hand is paid
-  await click(16, 16)
-  expect(await shown(/Virando/)).toBeDefined()
-  await ui.advance(4000)
+  // the table turns over card by card before the hand is paid
+  await click(16, 19)
+  expect(await shown(/Lá vem a mesa/)).toBeDefined()
+  expect(await shown(/SUAS CARTAS/)).toBeDefined()
+  await ui.advance(5000)
   expect(await shown(/Nada dessa vez|aposta de volta|! \+\d/)).toBeDefined()
   expect(await shown(/Nova mão/)).toBeDefined()
   await ui.unmount()

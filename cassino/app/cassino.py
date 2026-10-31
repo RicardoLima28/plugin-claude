@@ -115,11 +115,12 @@ def payout(faces):
     return 0
 
 
-# ---------- Video poker (Jacks or Better) ----------
+# ---------- Poker (fique com 2 das 5 e veja a mesa) ----------
 
 HANDS = ['Royal flush', 'Str. flush', 'Quadra', 'Full house', 'Flush', 'Sequência', 'Trinca',
          'Dois pares', 'Par de J+']
-HAND_PAYS = [250, 50, 25, 9, 6, 4, 3, 2, 1]
+HAND_PAYS = [250, 50, 10, 3, 3, 3, 2, 2, 1]
+RIVER = 10
 
 
 def shuffled():
@@ -128,30 +129,38 @@ def shuffled():
     return deck
 
 
-def rank_hand(hand):
-    """The best hand among HANDS as its index, or -1 for nothing."""
-    counts = {}
-    for r, _ in hand:
+def straight_top(ranks):
+    """The highest card of a straight among these ranks, the ace counting high and low, or 0."""
+    for top in range(14, 4, -1):
+        if all((1 if t == 14 else t) in ranks for t in range(top - 4, top + 1)):
+            return top
+    return 0
+
+
+def rank_hand(cards):
+    """The best five-card hand among these cards (your two and the table's five) as its index in HANDS, or -1."""
+    counts, suits = {}, {}
+    for r, s in cards:
         counts[r] = counts.get(r, 0) + 1
-    groups = sorted(counts.values(), reverse=True)
-    ranks = sorted(counts)
-    flush = len({s for _, s in hand}) == 1
-    straight = len(ranks) == 5 and (ranks[4] - ranks[0] == 4 or ranks == [1, 10, 11, 12, 13])
-    if straight and flush:
-        return 0 if ranks[:2] == [1, 10] else 1
-    if groups[0] == 4:
+        suits.setdefault(s, set()).add(r)
+    flush = next((rs for rs in suits.values() if len(rs) >= 5), None)
+    top = straight_top(flush) if flush else 0
+    if top:
+        return 0 if top == 14 else 1
+    groups = sorted(counts.values(), reverse=True) + [0]
+    if groups[0] >= 4:
         return 2
-    if groups[:2] == [3, 2]:
+    if groups[0] >= 3 and groups[1] >= 2:
         return 3
     if flush:
         return 4
-    if straight:
+    if straight_top(set(counts)):
         return 5
-    if groups[0] == 3:
+    if groups[0] >= 3:
         return 6
-    if groups[:2] == [2, 2]:
+    if groups[1] >= 2:
         return 7
-    if any(n == 2 and (r == 1 or r >= 11) for r, n in counts.items()):
+    if any(n >= 2 and (r == 1 or r >= 11) for r, n in counts.items()):
         return 8
     return -1
 
@@ -180,7 +189,7 @@ class Casino:
         self.bj = dict(phase='bet', dealer=[], player=[], hide=False, stake=0)
         self.sl = dict(spinning=False, frame=STOPS[2], strips=[[4], [4], [4]], stake=0, stops=STOPS,
                        tension=False)
-        self.pk = dict(phase='bet', hand=[], held=[], deck=[], stake=0, rank=-1)
+        self.pk = dict(phase='bet', hand=[], kept=[], board=[], deck=[], stake=0, rank=-1)
         self.flips = {}
         self.then = None
         self.party = 0
@@ -249,18 +258,19 @@ class Casino:
 
     def busy(self):
         return (self.r['spinning'] or self.sl['spinning'] or self.bj['phase'] == 'dealer'
-                or self.pk['phase'] == 'reveal' or self.flipping())
+                or self.pk['phase'] == 'board' or self.flipping())
 
     # ----- efeitos -----
 
-    def turn(self, slots, done=None, old=None):
-        """Turns the cards at these slots over one after another, then runs done; with old, each
-        first turns its old face down. While they turn, the cards take no clicks."""
+    def turn(self, slots, done=None, old=None, delay=lambda i: i * FLIP_GAP):
+        """Turns the cards at these slots over one after another, each delay(i) frames after the
+        first, then runs done; with old, each first turns its old face down. While they turn,
+        the cards take no clicks."""
         done = done or (lambda: None)
         if not slots:
             return done()
         for i, s in enumerate(slots):
-            seq = (DOWN if old else []) + ['b5'] * (i * FLIP_GAP + (2 if old else 0)) + UP
+            seq = (DOWN if old else []) + ['b5'] * (delay(i) + (2 if old else 0)) + UP
             self.flips[s] = dict(f=0, seq=seq, old=old[i] if old else None)
         self.then = done
 
@@ -480,45 +490,51 @@ class Casino:
 
     def deal_poker(self):
         pk = self.pk
-        if pk['phase'] in ('draw', 'reveal') or self.flipping():
+        if pk['phase'] in ('pick', 'board') or self.flipping():
             return
         stake = self.take_bet()
         if not stake:
             return
-        old = pk['hand'] or None
+        # the cards on show turn down first: the last table, or the last five dealt
+        old = pk['board'] or pk['hand'] or None
         deck = shuffled()
         hand = deck[:5]
-        pk.update(phase='draw', hand=hand, held=[False] * 5, deck=deck[5:], stake=stake, rank=-1)
+        pk.update(phase='pick', hand=hand, kept=[], board=[], deck=deck[5:], stake=stake, rank=-1)
         self.say('Distribuindo...')
+        self.turn([f'k{i}' for i in range(5)], lambda: self.say('Escolha 2 cartas para ficar.'), old)
 
-        def dealt():
-            pk['rank'] = rank_hand(hand)
-            if pk['rank'] >= 0:
-                self.say(f'Você tem {HANDS[pk["rank"]]}. Escolha as que ficam.')
-            else:
-                self.say('Escolha as cartas que ficam e troque.')
-        self.turn([f'k{i}' for i in range(5)], dealt, old)
-
-    def hold(self, i):
+    def keep(self, i):
+        """Keeps the dealt card i, or lets it go: two at most."""
         pk = self.pk
-        if pk['phase'] == 'draw' and not self.flipping():
-            pk['held'][i] = not pk['held'][i]
-
-    def swap(self):
-        """Turns the cards not held face down and up again as new ones, then pays the hand."""
-        pk = self.pk
-        if pk['phase'] != 'draw' or self.flipping():
+        if pk['phase'] != 'pick' or self.flipping():
             return
-        old = pk['hand']
-        out = [i for i in range(5) if not pk['held'][i]]
-        pk['hand'] = [card if held else pk['deck'].pop() for card, held in zip(old, pk['held'])]
-        pk['phase'] = 'reveal'
-        self.say('Virando...')
-        self.turn([f'k{i}' for i in out], self.pay_poker, [old[i] for i in out])
+        if i in pk['kept']:
+            pk['kept'].remove(i)
+        elif len(pk['kept']) < 2:
+            pk['kept'].append(i)
+        else:
+            return self.say('Só duas! Tire uma antes.')
+        self.say(['Escolha 2 cartas para ficar.', 'Escolha mais uma.',
+                  'Pronto! Clique em Ver a mesa.'][len(pk['kept'])])
+
+    def show_board(self):
+        """Turns the five dealt cards down and up again as the table's, then pays the best hand."""
+        pk = self.pk
+        if pk['phase'] != 'pick' or len(pk['kept']) != 2 or self.flipping():
+            return
+        pk['board'], pk['deck'] = pk['deck'][:5], pk['deck'][5:]
+        pk['phase'] = 'board'
+        self.say('Lá vem a mesa...')
+        # the flop's three one after another, then the turn and the river each after a pause
+        self.turn([f'k{i}' for i in range(5)], self.pay_poker, pk['hand'],
+                  lambda i: i * FLIP_GAP + (RIVER if i >= 3 else 0) + (RIVER if i >= 4 else 0))
+
+    def mine(self):
+        return [self.pk['hand'][i] for i in self.pk['kept']]
 
     def pay_poker(self):
         pk = self.pk
-        rank = pk['rank'] = rank_hand(pk['hand'])
+        rank = pk['rank'] = rank_hand(self.mine() + pk['board'])
         pk['phase'] = 'done'
         won = pk['stake'] * HAND_PAYS[rank] if rank >= 0 else 0
         self.coins += won
@@ -564,8 +580,11 @@ class Casino:
                 self.step_flips()
             if self.bj['phase'] == 'dealer':
                 self.step_dealer()
-            elif self.pk['phase'] == 'draw':
-                self.swap()
+            elif self.pk['phase'] == 'pick':
+                # a hand left halfway keeps its first cards and still sees the table
+                kept = self.pk['kept']
+                kept += [i for i in range(5) if i not in kept][:2 - len(kept)]
+                self.show_board()
             else:
                 break
 
@@ -815,9 +834,17 @@ def table_art(scr, game, x0, y0, width):
         scr.text(x0 + width - 1 - len(chip), y0 + 4, chip, glow(game, 0xffd43b))
 
 
+SLOT = 0x146c43
+
+
 def poker_art(scr, game, x0, y0, width):
+    """The pay table, then the five dealt cards (the table's five once it comes) and your two under them."""
     pk = game.pk
-    for j in range(10):
+
+    def mid(y, s):
+        scr.text(x0 + (width - len(s)) // 2, y, s, FELT_TEXT)
+
+    for j in range(13):
         scr.text(x0, y0 + j, ' ' * width, None, FELT)
     # the pay table in two columns, the hand on the table lit in gold
     for i, name in enumerate(HANDS):
@@ -825,18 +852,38 @@ def poker_art(scr, game, x0, y0, width):
         line = name.ljust(11 if left else 10) + str(HAND_PAYS[i]).rjust(4 if left else 3)
         scr.text(x0 + (1 if left else 18), y0 + (i if left else i - 4), line,
                  glow(game, GOLD) if i == pk['rank'] else FELT_TEXT)
+    picking = pk['phase'] == 'pick'
+    mid(y0 + 5, 'fique com 2 e veja a mesa' if pk['phase'] == 'bet' else 'escolha 2 cartas' if picking else 'MESA')
+
+    top = pk['hand'] if picking else pk['board'] or pk['hand']
     cx = x0 + (width - 29) // 2
     for i in range(5):
         x = cx + i * 6
-        card_art(scr, x, y0 + 6, pk['hand'][i] if pk['hand'] else None, game.flips.get(f'k{i}'))
-        if pk['phase'] not in ('draw', 'reveal'):
+        card_art(scr, x, y0 + 6, top[i] if top else None, game.flips.get(f'k{i}'))
+        if not picking:
             continue
-        if pk['held'][i]:
+        if i in pk['kept']:
             scr.text(x, y0 + 9, ' FICA', 0x111111, GOLD)
-        # the card and the row under it both hold it
-        if pk['phase'] == 'draw':
-            for j in range(6, 10):
-                scr.hits.append((x, x + 5, y0 + j, lambda i=i: game.hold(i)))
+        # the card and the row under it both keep it
+        for j in range(6, 10):
+            scr.hits.append((x, x + 5, y0 + j, lambda i=i: game.keep(i)))
+    if not picking and pk['board']:
+        mid(y0 + 9, 'SUAS CARTAS')
+
+    # your two, or the empty places waiting for them; a click on one lets it go
+    bx = x0 + (width - 11) // 2
+    for j in range(2):
+        x = bx + j * 6
+        if j >= len(pk['kept']):
+            for r in range(3):
+                scr.text(x, y0 + 10 + r, ' ' * 5, FELT_TEXT, SLOT)
+            scr.put(x + 2, y0 + 11, '?', FELT_TEXT)
+            continue
+        k = pk['kept'][j]
+        card_art(scr, x, y0 + 10, pk['hand'][k])
+        if picking:
+            for r in range(10, 13):
+                scr.hits.append((x, x + 5, y0 + r, lambda k=k: game.keep(k)))
 
 
 GOLD = 0xffd43b
@@ -921,17 +968,14 @@ def layout(game, w, h):
         pk = game.pk
         width = max(24, min(w - 2, 32))
         poker_art(scr, game, (w - width) // 2, y, width)
-        y += 11
-        if pk['phase'] == 'draw':
-            scr.row(y, [('Trocar', game.swap, 0x111111, GOLD)])
-        elif pk['phase'] != 'reveal':
+        y += 14
+        if pk['phase'] == 'pick':
+            ready = len(pk['kept']) == 2
+            scr.row(y, [('Ver a mesa', game.show_board if ready else None,
+                         0x111111 if ready else DIM, GOLD if ready else TAB_BG)])
+        elif pk['phase'] != 'board':
             label = 'Distribuir' if pk['phase'] == 'bet' else 'Nova mão'
             scr.row(y, [(label, game.deal_poker, 0x111111, GOLD)])
-        y += 2
-        if pk['phase'] == 'draw':
-            scr.center(y, 'clique nas cartas que ficam', DIM)
-        elif pk['phase'] != 'reveal':
-            scr.center(y, 'video poker · par de J ou mais', DIM)
         y += 2
     else:
         sl = game.sl

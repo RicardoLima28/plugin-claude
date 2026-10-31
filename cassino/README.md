@@ -1,10 +1,10 @@
 # Cassino
 
-Um mini cassino em pixel art para jogar no terminal com fichas fictícias, enquanto o Claude trabalha. Tem roleta (vermelho, preto ou verde), blackjack, caça-níquel e video poker. Tudo funciona com o mouse e o saldo fica salvo entre as sessões.
+Um mini cassino em pixel art para jogar no terminal com fichas fictícias, enquanto o Claude trabalha. Tem roleta (vermelho, preto ou verde), blackjack, caça-níquel e poker. Tudo funciona com o mouse e o saldo fica salvo entre as sessões.
 
 A aposta sobe e desce com `+` e `-` (10, 25, 50, 100, 250, 500, 1.000, 2.500...) e nunca passa do seu saldo: o limite é o que você tem. O botão All in aposta o saldo inteiro em cada rodada até você clicar nele de novo ou mexer na aposta.
 
-No poker (video poker, Jacks or Better), você recebe 5 cartas, clica nas que ficam (aparece FICA embaixo) e troca as outras uma vez. A mão final paga pela tabela na mesa: de par de valetes ou mais (aposta de volta) até royal flush (250x).
+No poker, você recebe 5 cartas e fica com 2 (aparece FICA embaixo; clique de novo para trocar a escolha). Depois vem a mesa com 5 cartas, uma a uma, e vale a melhor mão de 5 entre as suas 2 e as da mesa. Ela paga pela tabela na mesa: par de valetes ou mais devolve a aposta, dois pares pagam 2x e o royal flush paga 250x.
 
 ## Como abrir: painel ao lado do chat
 

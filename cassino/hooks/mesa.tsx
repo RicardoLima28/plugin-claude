@@ -100,11 +100,12 @@ function payout([a, b, c]: number[]) {
   return 0
 }
 
-// ---------- Video poker (Jacks or Better) ----------
+// ---------- Poker (fique com 2 das 5 e veja a mesa) ----------
 
 const HANDS = ['Royal flush', 'Str. flush', 'Quadra', 'Full house', 'Flush', 'Sequência', 'Trinca',
                'Dois pares', 'Par de J+']
-const HAND_PAYS = [250, 50, 25, 9, 6, 4, 3, 2, 1]
+const HAND_PAYS = [250, 50, 10, 3, 3, 3, 2, 2, 1]
+const RIVER = 10
 
 function shuffled() {
   const deck: Card[] = []
@@ -116,22 +117,35 @@ function shuffled() {
   return deck
 }
 
-/** The best hand among HANDS as its index, or -1 for nothing. */
-function rankHand(hand: Card[]) {
+/** The highest card of a straight among these ranks, the ace counting high and low, or 0. */
+function straightTop(ranks: Set<number>) {
+  for (let top = 14; top >= 5; top--) {
+    let run = 0
+    while (run < 5 && ranks.has(top - run === 14 ? 1 : top - run)) run += 1
+    if (run === 5) return top
+  }
+  return 0
+}
+
+/** The best five-card hand among these cards (your two and the table's five) as its index in HANDS, or -1. */
+function rankHand(cards: Card[]) {
   const counts = new Map<number, number>()
-  for (const [r] of hand) counts.set(r, (counts.get(r) ?? 0) + 1)
+  const suits = new Map<number, Set<number>>()
+  for (const [r, s] of cards) {
+    counts.set(r, (counts.get(r) ?? 0) + 1)
+    suits.set(s, (suits.get(s) ?? new Set()).add(r))
+  }
+  const flush = [...suits.values()].find(rs => rs.size >= 5)
+  const top = flush ? straightTop(flush) : 0
+  if (top) return top === 14 ? 0 : 1
   const groups = [...counts.values()].sort((a, b) => b - a)
-  const ranks = [...counts.keys()].sort((a, b) => a - b)
-  const flush = hand.every(([, s]) => s === hand[0][1])
-  const straight = ranks.length === 5 && (ranks[4] - ranks[0] === 4 || ranks.join() === '1,10,11,12,13')
-  if (straight && flush) return ranks[0] === 1 && ranks[1] === 10 ? 0 : 1
-  if (groups[0] === 4) return 2
-  if (groups[0] === 3 && groups[1] === 2) return 3
+  if (groups[0] >= 4) return 2
+  if (groups[0] >= 3 && groups[1] >= 2) return 3
   if (flush) return 4
-  if (straight) return 5
-  if (groups[0] === 3) return 6
-  if (groups[0] === 2 && groups[1] === 2) return 7
-  if ([...counts].some(([r, n]) => n === 2 && (r === 1 || r >= 11))) return 8
+  if (straightTop(new Set(counts.keys()))) return 5
+  if (groups[0] >= 3) return 6
+  if (groups[1] >= 2) return 7
+  if ([...counts].some(([r, n]) => n >= 2 && (r === 1 || r >= 11))) return 8
   return -1
 }
 
@@ -156,8 +170,8 @@ class Casino {
   bj = { phase: 'bet' as 'bet' | 'play' | 'dealer' | 'done', dealer: [] as Card[],
          player: [] as Card[], hide: false, stake: 0 }
   sl = { spinning: false, frame: STOPS[2], strips: [[4], [4], [4]], stake: 0, stops: STOPS, tension: false }
-  pk = { phase: 'bet' as 'bet' | 'draw' | 'reveal' | 'done', hand: [] as Card[], held: [] as boolean[],
-         deck: [] as Card[], stake: 0, rank: -1 }
+  pk = { phase: 'bet' as 'bet' | 'pick' | 'board' | 'done', hand: [] as Card[], kept: [] as number[],
+         board: [] as Card[], deck: [] as Card[], stake: 0, rank: -1 }
   flips: Record<string, Flip> = {}
   then: (() => void) | null = null
   party = 0
@@ -224,18 +238,19 @@ class Casino {
   }
 
   busy() {
-    return this.r.spinning || this.sl.spinning || this.bj.phase === 'dealer' || this.pk.phase === 'reveal'
+    return this.r.spinning || this.sl.spinning || this.bj.phase === 'dealer' || this.pk.phase === 'board'
       || this.flipping()
   }
 
   // ----- efeitos -----
 
-  /** Turns the cards at these slots over one after another, then runs done; with old, each
-   *  first turns its old face down. While they turn, the cards take no clicks. */
-  turn(slots: string[], done: () => void = () => {}, old?: Card[]) {
+  /** Turns the cards at these slots over one after another, each delay(i) frames after the
+   *  first, then runs done; with old, each first turns its old face down. While they turn,
+   *  the cards take no clicks. */
+  turn(slots: string[], done: () => void = () => {}, old?: Card[], delay = (i: number) => i * FLIP_GAP) {
     if (!slots.length) return done()
     slots.forEach((s, i) => {
-      const seq = [...(old ? DOWN : []), ...Array<string>(i * FLIP_GAP + (old ? 2 : 0)).fill('b5'), ...UP]
+      const seq = [...(old ? DOWN : []), ...Array<string>(delay(i) + (old ? 2 : 0)).fill('b5'), ...UP]
       this.flips[s] = { f: 0, seq, old: old?.[i] }
     })
     this.then = done
@@ -442,41 +457,47 @@ class Casino {
 
   dealPoker() {
     const pk = this.pk
-    if (pk.phase === 'draw' || pk.phase === 'reveal' || this.flipping()) return
+    if (pk.phase === 'pick' || pk.phase === 'board' || this.flipping()) return
     const stake = this.takeBet()
     if (!stake) return
-    const old = pk.hand.length ? pk.hand : undefined
+    // the cards on show turn down first: the last table, or the last five dealt
+    const old = pk.board.length ? pk.board : pk.hand.length ? pk.hand : undefined
     const deck = shuffled()
     const hand = deck.splice(0, 5)
-    Object.assign(pk, { phase: 'draw', hand, held: hand.map(() => false), deck, stake, rank: -1 })
+    Object.assign(pk, { phase: 'pick', hand, kept: [], board: [], deck, stake, rank: -1 })
     this.say('Distribuindo...')
-    this.turn(hand.map((_, i) => `k${i}`), () => {
-      pk.rank = rankHand(hand)
-      this.say(pk.rank >= 0 ? `Você tem ${HANDS[pk.rank]}. Escolha as que ficam.`
-                            : 'Escolha as cartas que ficam e troque.')
-    }, old)
+    this.turn(hand.map((_, i) => `k${i}`), () => this.say('Escolha 2 cartas para ficar.'), old)
   }
 
-  hold(i: number) {
+  /** Keeps the dealt card i, or lets it go: two at most. */
+  keep(i: number) {
     const pk = this.pk
-    if (pk.phase === 'draw' && !this.flipping()) pk.held[i] = !pk.held[i]
+    if (pk.phase !== 'pick' || this.flipping()) return
+    if (pk.kept.includes(i)) pk.kept = pk.kept.filter(k => k !== i)
+    else if (pk.kept.length < 2) pk.kept.push(i)
+    else return this.say('Só duas! Tire uma antes.')
+    this.say(['Escolha 2 cartas para ficar.', 'Escolha mais uma.', 'Pronto! Clique em Ver a mesa.'][pk.kept.length])
   }
 
-  /** Turns the cards not held face down and up again as new ones, then pays the hand. */
-  swap() {
+  /** Turns the five dealt cards down and up again as the table's, then pays the best hand. */
+  showBoard() {
     const pk = this.pk
-    if (pk.phase !== 'draw' || this.flipping()) return
-    const old = pk.hand
-    const out = [0, 1, 2, 3, 4].filter(i => !pk.held[i])
-    pk.hand = old.map((card, i) => (pk.held[i] ? card : pk.deck.pop()!))
-    pk.phase = 'reveal'
-    this.say('Virando...')
-    this.turn(out.map(i => `k${i}`), () => this.payPoker(), out.map(i => old[i]))
+    if (pk.phase !== 'pick' || pk.kept.length !== 2 || this.flipping()) return
+    pk.board = pk.deck.splice(0, 5)
+    pk.phase = 'board'
+    this.say('Lá vem a mesa...')
+    // the flop's three one after another, then the turn and the river each after a pause
+    this.turn(pk.board.map((_, i) => `k${i}`), () => this.payPoker(), pk.hand,
+              i => i * FLIP_GAP + (i >= 3 ? RIVER : 0) + (i >= 4 ? RIVER : 0))
+  }
+
+  mine() {
+    return this.pk.kept.map(i => this.pk.hand[i])
   }
 
   payPoker() {
     const pk = this.pk
-    pk.rank = rankHand(pk.hand)
+    pk.rank = rankHand([...this.mine(), ...pk.board])
     pk.phase = 'done'
     const won = pk.rank >= 0 ? pk.stake * HAND_PAYS[pk.rank] : 0
     this.coins += won
@@ -520,8 +541,11 @@ class Casino {
     for (;;) {
       while (this.flipping()) this.stepFlips()
       if (this.bj.phase === 'dealer') this.stepDealer()
-      else if (this.pk.phase === 'draw') this.swap()
-      else break
+      else if (this.pk.phase === 'pick') {
+        // a hand left halfway keeps its first cards and still sees the table
+        for (let i = 0; this.pk.kept.length < 2; i++) if (!this.pk.kept.includes(i)) this.pk.kept.push(i)
+        this.showBoard()
+      } else break
     }
   }
 }
@@ -778,23 +802,46 @@ function tableArt(scr: Screen, game: Casino, x0: number, y0: number, width: numb
   }
 }
 
+const SLOT = 0x146c43
+
+/** The pay table, then the five dealt cards (the table's five once it comes) and your two under them. */
 function pokerArt(scr: Screen, game: Casino, x0: number, y0: number, width: number) {
   const pk = game.pk
-  for (let j = 0; j < 10; j++) scr.text(x0, y0 + j, ' '.repeat(width), null, FELT)
+  const mid = (y: number, s: string) => scr.text(x0 + Math.floor((width - [...s].length) / 2), y, s, FELT_TEXT)
+  for (let j = 0; j < 13; j++) scr.text(x0, y0 + j, ' '.repeat(width), null, FELT)
   // the pay table in two columns, the hand on the table lit in gold
   HANDS.forEach((name, i) => {
     const left = i < 4
     const line = name.padEnd(left ? 11 : 10) + String(HAND_PAYS[i]).padStart(left ? 4 : 3)
     scr.text(x0 + (left ? 1 : 18), y0 + (left ? i : i - 4), line, i === pk.rank ? glow(game, GOLD) : FELT_TEXT)
   })
+  const picking = pk.phase === 'pick'
+  mid(y0 + 5, pk.phase === 'bet' ? 'fique com 2 e veja a mesa' : picking ? 'escolha 2 cartas' : 'MESA')
+
+  const top = picking ? pk.hand : pk.board.length ? pk.board : pk.hand
   const cx = x0 + Math.floor((width - 29) / 2)
   for (let i = 0; i < 5; i++) {
     const x = cx + i * 6
-    cardArt(scr, x, y0 + 6, pk.hand[i] ?? null, game.flips[`k${i}`])
-    if (pk.phase !== 'draw' && pk.phase !== 'reveal') continue
-    if (pk.held[i]) scr.text(x, y0 + 9, ' FICA', 0x111111, GOLD)
-    // the card and the row under it both hold it
-    if (pk.phase === 'draw') for (let j = 6; j < 10; j++) scr.hits.push([x, x + 5, y0 + j, () => game.hold(i)])
+    cardArt(scr, x, y0 + 6, top[i] ?? null, game.flips[`k${i}`])
+    if (!picking) continue
+    if (pk.kept.includes(i)) scr.text(x, y0 + 9, ' FICA', 0x111111, GOLD)
+    // the card and the row under it both keep it
+    for (let j = 6; j < 10; j++) scr.hits.push([x, x + 5, y0 + j, () => game.keep(i)])
+  }
+  if (!picking && pk.board.length) mid(y0 + 9, 'SUAS CARTAS')
+
+  // your two, or the empty places waiting for them; a click on one lets it go
+  const bx = x0 + Math.floor((width - 11) / 2)
+  for (let j = 0; j < 2; j++) {
+    const x = bx + j * 6
+    const k = pk.kept[j]
+    if (k === undefined) {
+      for (let r = 0; r < 3; r++) scr.text(x, y0 + 10 + r, ' '.repeat(5), FELT_TEXT, SLOT)
+      scr.put(x + 2, y0 + 11, '?', FELT_TEXT)
+      continue
+    }
+    cardArt(scr, x, y0 + 10, pk.hand[k])
+    if (picking) for (let r = 10; r < 13; r++) scr.hits.push([x, x + 5, y0 + r, () => game.keep(k)])
   }
 }
 
@@ -874,14 +921,13 @@ function layout(game: Casino, w: number, h: number) {
     const pk = game.pk
     const width = Math.max(24, Math.min(w - 2, 32))
     pokerArt(scr, game, Math.floor((w - width) / 2), y, width)
-    y += 11
-    if (pk.phase === 'draw') scr.row(y, [['Trocar', () => game.swap(), 0x111111, GOLD]])
-    else if (pk.phase !== 'reveal') {
+    y += 14
+    if (pk.phase === 'pick') {
+      const ready = pk.kept.length === 2
+      scr.row(y, [['Ver a mesa', ready ? () => game.showBoard() : null, ready ? 0x111111 : DIM, ready ? GOLD : TAB_BG]])
+    } else if (pk.phase !== 'board') {
       scr.row(y, [[pk.phase === 'bet' ? 'Distribuir' : 'Nova mão', () => game.dealPoker(), 0x111111, GOLD]])
     }
-    y += 2
-    if (pk.phase === 'draw') scr.center(y, 'clique nas cartas que ficam', DIM)
-    else if (pk.phase !== 'reveal') scr.center(y, 'video poker · par de J ou mais', DIM)
     y += 2
   } else {
     const sl = game.sl
